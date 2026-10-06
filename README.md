@@ -24,7 +24,7 @@
 ### 1. 把插件放到本机
 
 ```bash
-git clone <本仓库地址> ai-render
+git clone https://github.com/cqdjyjy/dsh-ai-render.git ai-render
 ```
 
 ### 2. 链接进 DSH profile
