@@ -431,4 +431,18 @@ assert(clientSource.includes('setViewer({ url: item.url'), '「看大图」按�
 assert(/cr-viewer-img/.test(clientSource), '浮层里有大图元素')
 assert(/setViewer\(null\)/.test(clientSource), '有关闭浮层的逻辑')
 
+console.log('\n== 面板不能默认选一个「没配置」的通道 ==')
+// 用户只配了中转站，但面板初始 provider 写死 'ark'（即梦，没 Key）——
+// 一打开就点生成必然报「还没配置火山方舟 API Key」。
+assert(clientSource.includes('providerTouchedRef'), '有「用户是否手动选过通道」的标记')
+assert(/if \(!providerTouchedRef\.current\)/.test(clientSource), '状态回来后，用户没选过就自动切到已配置的通道')
+assert(
+  /const pick = order\.find\(\(id\) => configured\[id\]\)/.test(clientSource),
+  '按「已配置」挑通道，而不是写死顺序',
+)
+assert(
+  (clientSource.match(/providerTouchedRef\.current = true/g) ?? []).length >= 2,
+  '手动点击 / 从历史还原都标记为「已选过」（不被自动挑选顶掉）',
+)
+
 console.log(process.exitCode ? '\nSMOKE TEST FAILED' : '\nSMOKE TEST PASSED')

@@ -1170,6 +1170,8 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       const [cad, setCad] = React.useState(null)
       const [refs, setRefs] = React.useState([])
       const [provider, setProvider] = React.useState('ark')
+      // 用户是否手动选过通道：选过就不再自动切，免得把手动选择顶掉
+      const providerTouchedRef = React.useRef(false)
       const [count, setCount] = React.useState(1)
       const [catalog, setCatalog] = React.useState(null)
       const [taskMode, setTaskMode] = React.useState('elevation')
@@ -1619,7 +1621,11 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       /** 把一条历史记录的参数整套还原到面板上，改完就能再来一张。 */
       function restoreParams(record) {
         if (!record) return
-        if (record.provider) setProvider(record.provider)
+        if (record.provider) {
+          // 从历史还原也算用户的明确选择，别再被自动挑选顶掉
+          providerTouchedRef.current = true
+          setProvider(record.provider)
+        }
         if (record.taskMode) setTaskMode(record.taskMode)
         if (record.stylePreset) setStyleIds([record.stylePreset])
         if (record.lighting) setLighting(record.lighting)
@@ -1713,6 +1719,20 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
             setRelayModel(info.openai?.model ?? '')
             setRelayMode(info.openai?.mode ?? 'auto')
             setFidelity(String(info.openai?.inputFidelity ?? '').trim() || 'high')
+
+            // 面板初始 provider 写死是 'ark'，但用户常常只配了别家 ——
+            // 那样一打开就选着「未配置」的通道，点生成必然报「还没配置…API Key」。
+            // 所以状态回来时，只要用户还没手动选过，就自动切到第一个已配置的通道。
+            if (!providerTouchedRef.current) {
+              const configured = {
+                openai: Boolean(info.openai?.configured),
+                qwen: Boolean(info.qwen?.configured),
+                ark: Boolean(info.ark?.configured),
+              }
+              const order = [info.defaultProvider, 'openai', 'qwen', 'ark'].filter(Boolean)
+              const pick = order.find((id) => configured[id])
+              if (pick) setProvider(pick)
+            }
           })
           .catch(() => {})
         callCommand(ctx, sessionId, { action: 'presets' }, [])
@@ -2644,7 +2664,10 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
                   {
                     key: item.id,
                     'data-active': provider === item.id ? '1' : '0',
-                    onClick: () => setProvider(item.id),
+                    onClick: () => {
+                      providerTouchedRef.current = true
+                      setProvider(item.id)
+                    },
                     disabled: busy,
                     title: item.hint,
                   },
