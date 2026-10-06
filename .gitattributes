@@ -1,0 +1,19 @@
+# 统一换行符：仓库里一律存 LF，检出时按平台自动转换。
+# 不加这个文件的话，Windows 提交的 CRLF 会让 Linux/macOS 上的 diff 满屏"改动"。
+* text=auto
+
+# 文本文件显式声明
+*.js   text
+*.mjs  text
+*.json text
+*.yml  text
+*.md   text
+*.svg  text
+*.py   text
+
+# 二进制：不要做任何换行转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.gif  binary
