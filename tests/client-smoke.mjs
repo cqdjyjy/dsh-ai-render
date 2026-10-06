@@ -445,4 +445,40 @@ assert(
   '手动点击 / 从历史还原都标记为「已选过」（不被自动挑选顶掉）',
 )
 
+console.log('\n== 滑动对比：指针换算与裁切（几何必须准） ==')
+const bounds = { left: 100, width: 400 }
+assert(icons.revealFromPointer(300, bounds) === 0.5, '正中间 → 0.5')
+assert(icons.revealFromPointer(100, bounds) === 0, '最左 → 0')
+assert(icons.revealFromPointer(500, bounds) === 1, '最右 → 1')
+assert(icons.revealFromPointer(0, bounds) === 0, '拖到框外左侧被钳制到 0')
+assert(icons.revealFromPointer(9999, bounds) === 1, '拖到框外右侧被钳制到 1')
+assert(icons.revealFromPointer(200, bounds) === 0.25, '1/4 处 → 0.25')
+// 坏输入不能崩，也不能给出越界值
+for (const bad of [null, undefined, {}, { left: 0, width: 0 }, { left: 'x', width: 'y' }]) {
+  const out = icons.revealFromPointer(123, bad)
+  assert(Number.isFinite(out) && out >= 0 && out <= 1, `坏 bounds 也返回 0~1（得到 ${out}）`)
+}
+assert(icons.revealFromPointer(NaN, bounds) === 0.5, 'clientX 是 NaN → 回到 0.5，不崩')
+
+assert(icons.clipInsetFor(0) === 'inset(0 100.000% 0 0)', '比例 0：原图完全裁掉')
+assert(icons.clipInsetFor(1) === 'inset(0 0.000% 0 0)', '比例 1：原图完整显示')
+assert(icons.clipInsetFor(0.25) === 'inset(0 75.000% 0 0)', '比例 0.25：右侧裁掉 75%')
+assert(icons.clipInsetFor(0.5) === 'inset(0 50.000% 0 0)', '比例 0.5：右侧裁掉一半')
+assert(icons.clipInsetFor(-3) === icons.clipInsetFor(0), '负比例被钳制到 0')
+assert(icons.clipInsetFor(9) === icons.clipInsetFor(1), '超过 1 被钳制到 1')
+assert(icons.clipInsetFor(NaN) === icons.clipInsetFor(0.5), 'NaN 回落到 0.5')
+
+console.log('\n== 滑动对比：组件与接线 ==')
+assert(clientSource.includes('function CompareSlider'), '有 CompareSlider 组件')
+assert(/clipPath:\s*clipInsetFor\(ratio\)/.test(clientSource), '上层用 clipPath 裁切（改宽度会让对比形变）')
+assert(clientSource.includes('cr-slider-before'), '有上层（原图）元素')
+assert(clientSource.includes('cr-slider-line'), '有分割竖线')
+assert(/onPointerDown: down/.test(clientSource) && /onPointerMove: move/.test(clientSource), '拖动由指针事件驱动')
+assert(/setPointerCapture/.test(clientSource), '拖动时捕获指针（拖出组件也不断）')
+assert(clientSource.includes('滑动对比'), '结果卡片上有「滑动对比」按钮')
+assert(clientSource.includes('单图查看'), '再点一次可收起回单图')
+assert(clientSource.includes('cr-slider-sources'), '有两种原图时可切换对比对象')
+assert(clientSource.includes('cad?.previewUrl'), '底图可作为对比原图')
+assert(clientSource.includes('item.compareFrom'), '上一版可作为对比原图')
+
 console.log(process.exitCode ? '\nSMOKE TEST FAILED' : '\nSMOKE TEST PASSED')

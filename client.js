@@ -584,6 +584,26 @@ window.__ModuleLoader__.load({
   text-overflow:ellipsis;white-space:nowrap}
 .cr-viewer-bar .cr-btn{background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.25);
   text-decoration:none}
+/* 滑动对比：两层严格重合，拖动竖线按比例揭示 */
+.cr-slider{position:relative;width:100%;overflow:hidden;border-radius:6px;background:#111;
+  cursor:ew-resize;touch-action:none;user-select:none;-webkit-user-select:none}
+.cr-slider[data-dragging="1"]{cursor:grabbing}
+.cr-slider-img{display:block;width:100%;height:auto}
+.cr-slider-before{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.cr-slider-line{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:#fff;
+  box-shadow:0 0 0 1px rgba(0,0,0,.35);pointer-events:none}
+.cr-slider-handle{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:36px;height:36px;border-radius:50%;background:#fff;color:#333;font-size:11px;
+  line-height:1;display:flex;align-items:center;justify-content:center;
+  box-shadow:0 2px 10px rgba(0,0,0,.4)}
+.cr-slider-tag{position:absolute;top:8px;font-size:11px;line-height:1.5;padding:2px 9px;
+  border-radius:999px;background:rgba(0,0,0,.55);color:#fff;pointer-events:none;
+  backdrop-filter:blur(2px)}
+.cr-slider-tag-left{left:8px}
+.cr-slider-tag-right{right:8px}
+.cr-slider-sources{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.cr-btn[data-active="1"]{border-color:var(--dsw-alias-text-brand);color:var(--dsw-alias-text-brand);
+  font-weight:600}
 .cr-cropratios{flex-wrap:wrap;gap:6px}
 .cr-chip{padding:4px 10px;border-radius:999px;font-size:12px;cursor:pointer;
   border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);
@@ -1025,6 +1045,90 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
      * 支持**按比例锁定**：出图尺寸是由底图长宽比决定的，所以裁切时就把比例锁好
      * 比事后拉伸有用得多 —— 裁歪了后面改不回来（只能靠出图比例去硬掰）。
      */
+    // ------------------------------------------------------------ 滑动对比
+    //
+    // 两张图严格重合，拖动竖线按比例揭示：左侧看原图、右侧看效果图。
+    // 几何部分做成纯函数，方便离线验证（越界、钳制、裁切字符串都测得到）。
+
+    /** 指针横向位置 → 揭示比例（0~1，钳制在边界内）。 */
+    function revealFromPointer(clientX, bounds) {
+      if (!bounds || !(Number(bounds.width) > 0)) return 0.5
+      const raw = (Number(clientX) - Number(bounds.left)) / Number(bounds.width)
+      if (!Number.isFinite(raw)) return 0.5
+      return Math.min(1, Math.max(0, raw))
+    }
+
+    /**
+     * 上层（原图）的裁切样式：保留左侧 ratio 比例。
+     *
+     * 用 clip-path 而不是宽度，是为了让两层始终严丝合缝地重合 ——
+     * 改宽度会把原图压扁，那样对比出来的形变是假的。
+     */
+    function clipInsetFor(ratio) {
+      const safe = Number.isFinite(Number(ratio)) ? Number(ratio) : 0.5
+      const clamped = Math.min(1, Math.max(0, safe))
+      return `inset(0 ${((1 - clamped) * 100).toFixed(3)}% 0 0)`
+    }
+
+    /**
+     * 滑动对比组件。
+     *
+     * 底层放「效果图」（整幅），上层放「原图」并按 clipInsetFor 裁掉右侧，
+     * 所以竖线左边是原图、右边是效果图。拖动/点按都可以移动竖线。
+     */
+    function CompareSlider(props) {
+      const boxRef = React.useRef(null)
+      const [ratio, setRatio] = React.useState(0.5)
+      const [dragging, setDragging] = React.useState(false)
+
+      const update = (event) => {
+        const element = boxRef.current
+        if (!element || typeof element.getBoundingClientRect !== 'function') return
+        setRatio(revealFromPointer(event.clientX, element.getBoundingClientRect()))
+      }
+      const down = (event) => {
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId)
+        } catch {
+          /* 老浏览器不支持指针捕获也不影响拖拽 */
+        }
+        setDragging(true)
+        update(event)
+      }
+      const move = (event) => {
+        if (dragging) update(event)
+      }
+      const up = () => setDragging(false)
+
+      return h(
+        'div',
+        {
+          className: 'cr-slider',
+          ref: boxRef,
+          'data-dragging': dragging ? '1' : '0',
+          onPointerDown: down,
+          onPointerMove: move,
+          onPointerUp: up,
+          onPointerCancel: up,
+        },
+        h('img', { className: 'cr-slider-img', src: props.afterSrc, alt: '效果图', draggable: false }),
+        h('img', {
+          className: 'cr-slider-img cr-slider-before',
+          src: props.beforeSrc,
+          alt: '原图',
+          draggable: false,
+          style: { clipPath: clipInsetFor(ratio) },
+        }),
+        h(
+          'div',
+          { className: 'cr-slider-line', style: { left: `${(ratio * 100).toFixed(3)}%` } },
+          h('span', { className: 'cr-slider-handle' }, '◀▶'),
+        ),
+        h('span', { className: 'cr-slider-tag cr-slider-tag-left' }, props.beforeLabel || '原图'),
+        h('span', { className: 'cr-slider-tag cr-slider-tag-right' }, props.afterLabel || '效果图'),
+      )
+    }
+
     function CropBox(props) {
       const boxRef = React.useRef(null)
       const dragRef = React.useRef(null)
@@ -1211,6 +1315,13 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
        * 不依赖浏览器新标签行为。
        */
       const [viewer, setViewer] = React.useState(null)
+      /**
+       * 滑动对比：哪一张结果正在对比（-1 = 没有），以及拿谁当「原图」。
+       *   base = 底图（CAD / 线稿 / 照片）
+       *   prev = 上一版效果图（质检自动修正时才有）
+       */
+      const [sliderIndex, setSliderIndex] = React.useState(-1)
+      const [sliderSource, setSliderSource] = React.useState('base')
       // 结果落一份到 sessionStorage：面板重新挂载（刷新/换会话）后还能恢复出来。
       // 只存文件描述，不存预览 URL —— 那个是 objectURL，页面一换就失效，
       // 而且体积大（一张图几百 KB）会撑爆配额。
@@ -2792,9 +2903,24 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               h(
                 'div',
                 { className: 'cr-result', key: item.path ?? index },
-                item.url
-                  ? h('img', { src: item.url, alt: item.name })
-                  : h('div', { className: 'cr-error' }, `图片预览失败：${item.readError ?? ''}`),
+                (() => {
+                  // 可用的「原图」来源：底图，以及质检修正时的上一版
+                  const baseSrc = cad?.previewUrl ?? ''
+                  const source =
+                    sliderSource === 'prev' && item.compareFrom ? item.compareFrom : baseSrc
+                  const sourceLabel = sliderSource === 'prev' && item.compareFrom ? '上一版' : '底图'
+                  if (sliderIndex === index && item.url && source) {
+                    return h(CompareSlider, {
+                      afterSrc: item.url,
+                      beforeSrc: source,
+                      beforeLabel: `${sourceLabel} · 原图`,
+                      afterLabel: '效果图',
+                    })
+                  }
+                  return item.url
+                    ? h('img', { src: item.url, alt: item.name })
+                    : h('div', { className: 'cr-error' }, `图片预览失败：${item.readError ?? ''}`)
+                })(),
                 h(
                   'div',
                   { className: 'cr-result-foot' },
@@ -2824,9 +2950,49 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
                       onClick: () => setViewer({ url: item.url, name: item.name, path: item.path }),
                     }, '看大图'),
                   item.url &&
+                    (cad?.previewUrl || item.compareFrom) &&
+                    h(
+                      'button',
+                      {
+                        className: 'cr-btn',
+                        type: 'button',
+                        'data-active': sliderIndex === index ? '1' : '0',
+                        onClick: () => {
+                          // 再点一次收起，回到单图
+                          setSliderIndex((previous) => (previous === index ? -1 : index))
+                          setSliderSource('base')
+                        },
+                      },
+                      sliderIndex === index ? '单图查看' : '滑动对比',
+                    ),
+                  item.url &&
                     h('a', { href: item.url, download: item.name }, '下载'),
                   h('span', { className: 'cr-note', style: { flex: '1 1 100%' } }, item.path ?? ''),
                 ),
+                // 对比来源切换：只在「滑动对比」开着、且确实有两种原图时出现
+                sliderIndex === index && item.compareFrom && cad?.previewUrl
+                  ? h(
+                      'div',
+                      { className: 'cr-slider-sources', style: { padding: '8px 10px 0' } },
+                      h('span', { className: 'cr-note' }, '对比对象'),
+                      ...[
+                        { id: 'base', label: '底图' },
+                        { id: 'prev', label: '上一版' },
+                      ].map((option) =>
+                        h(
+                          'button',
+                          {
+                            key: option.id,
+                            className: 'cr-chip',
+                            type: 'button',
+                            'data-active': sliderSource === option.id ? '1' : '0',
+                            onClick: () => setSliderSource(option.id),
+                          },
+                          option.label,
+                        ),
+                      ),
+                    )
+                  : null,
                 item.compareFrom
                   ? h(
                       'div',
@@ -3112,6 +3278,8 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         fitCropRect,
         fitCropAll,
         refitCropRect,
+        revealFromPointer,
+        clipInsetFor,
       },
     }
   },
