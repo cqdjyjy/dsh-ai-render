@@ -422,4 +422,13 @@ assert(
   '恢复时重新取预览图（文件还在磁盘上）',
 )
 
+console.log('\n== 看大图必须能打开（不能依赖浏览器新标签） ==')
+// 用户反馈「点看大图没反应」：原来是 <a target="_blank" href="blob:...">，
+// 在 DSH 这种 Electron/WebView 里会被拦截。改成面板内浮层。
+assert(!/target:\s*'_blank'/.test(clientSource), '没有 target=_blank 打开 blob 的写法（Electron 里点不动）')
+assert(clientSource.includes('cr-viewer'), '有应用内大图浮层（cr-viewer）')
+assert(clientSource.includes('setViewer({ url: item.url'), '「看大图」按钮改为打开浮层')
+assert(/cr-viewer-img/.test(clientSource), '浮层里有大图元素')
+assert(/setViewer\(null\)/.test(clientSource), '有关闭浮层的逻辑')
+
 console.log(process.exitCode ? '\nSMOKE TEST FAILED' : '\nSMOKE TEST PASSED')

@@ -573,6 +573,17 @@ window.__ModuleLoader__.load({
 .cr-verdict{font-size:11px;padding:3px 8px;border-radius:999px;white-space:nowrap}
 .cr-verdict[data-kind="ok"]{background:rgba(46,160,67,.14);color:#2ea043}
 .cr-verdict[data-kind="fix"]{background:rgba(210,153,34,.16);color:#b8860b}
+/* 大图浮层：不走浏览器新标签（Electron 里 target=_blank 会被拦） */
+.cr-viewer{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.82);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+  padding:18px;cursor:zoom-out}
+.cr-viewer-img{max-width:96vw;max-height:84vh;object-fit:contain;border-radius:6px;
+  background:#fff;box-shadow:0 12px 40px rgba(0,0,0,.5);cursor:default}
+.cr-viewer-bar{display:flex;align-items:center;gap:8px;cursor:default}
+.cr-viewer-name{color:#fff;font-size:12px;opacity:.85;max-width:56vw;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.cr-viewer-bar .cr-btn{background:rgba(255,255,255,.14);color:#fff;border-color:rgba(255,255,255,.25);
+  text-decoration:none}
 .cr-cropratios{flex-wrap:wrap;gap:6px}
 .cr-chip{padding:4px 10px;border-radius:999px;font-size:12px;cursor:pointer;
   border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);
@@ -1190,6 +1201,14 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       const [error, setError] = React.useState('')
       const [note, setNote] = React.useState('')
       const [results, setResults] = React.useState([])
+      /**
+       * 应用内大图预览。
+       *
+       * 原先「看大图」是 <a target="_blank" href="blob:...">，在 DSH 这种
+       * Electron/WebView 里会被拦截（用户反馈：点了没反应）。改成面板内浮层，
+       * 不依赖浏览器新标签行为。
+       */
+      const [viewer, setViewer] = React.useState(null)
       // 结果落一份到 sessionStorage：面板重新挂载（刷新/换会话）后还能恢复出来。
       // 只存文件描述，不存预览 URL —— 那个是 objectURL，页面一换就失效，
       // 而且体积大（一张图几百 KB）会撑爆配额。
@@ -2775,7 +2794,12 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
                       disabled: busy,
                       onClick: () => pickForRefine(item.path),
                     }, '改这张'),
-                  item.url && h('a', { href: item.url, target: '_blank', rel: 'noreferrer' }, '看大图'),
+                  item.url &&
+                    h('button', {
+                      className: 'cr-btn',
+                      type: 'button',
+                      onClick: () => setViewer({ url: item.url, name: item.name, path: item.path }),
+                    }, '看大图'),
                   item.url &&
                     h('a', { href: item.url, download: item.name }, '下载'),
                   h('span', { className: 'cr-note', style: { flex: '1 1 100%' } }, item.path ?? ''),
@@ -2926,6 +2950,29 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
           { className: 'cr-note' },
           '提示：也可以直接在对话里用 /ai-render 调用（旧名 /cabinet-render 仍可用）；面板与 Agent 走同一条命令。',
         ),
+
+        // 大图浮层：点「看大图」打开，点任意处关闭
+        viewer &&
+          h(
+            'div',
+            {
+              className: 'cr-viewer',
+              onClick: () => setViewer(null),
+              title: '点击任意处关闭',
+            },
+            h('img', { className: 'cr-viewer-img', src: viewer.url, alt: viewer.name ?? '大图' }),
+            h(
+              'div',
+              { className: 'cr-viewer-bar', onClick: (event) => event.stopPropagation() },
+              h('span', { className: 'cr-viewer-name' }, viewer.name ?? ''),
+              h(
+                'a',
+                { className: 'cr-btn', href: viewer.url, download: viewer.name },
+                '下载',
+              ),
+              h('button', { className: 'cr-btn', type: 'button', onClick: () => setViewer(null) }, '关闭'),
+            ),
+          ),
       )
     }
 
