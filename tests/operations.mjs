@@ -544,6 +544,17 @@ const fidReq = seen.find((entry) => entry.path.includes('/images/') && entry.pat
 check(String(fidReq?.text).includes('name="input_fidelity"'), '创建请求里带上了 input_fidelity 字段')
 check(/input_fidelity"\s*\r?\n\r?\nhigh/.test(String(fidReq?.text)) || String(fidReq?.text).includes('high'), '值为 high')
 
+console.log('\n== 3e. 画布被接口归并时，护栏必须进提示词 ==')
+// gpt-image 只认三种尺寸：竖图底图（测试用的是 272x437 = 0.622）会被归到
+// 1024x1536（0.667），相差 7.1%。修复前护栏用的是「我们心里算的尺寸」
+// （1280x2048 = 0.625），判断为「一致」→ 护栏压根没进提示词 →
+// 模型为了填满画布拉伸重排（用户反馈：结构和比例还是被改了）。
+const guardBody = String(fidReq?.text ?? '')
+check(guardBody.includes('画布与主体'), '画布被归并时护栏进了提示词')
+check(/相差约 ?7%/.test(guardBody), '护栏里带了具体偏差百分比（7%）')
+check(guardBody.includes('每一格的长宽比'), '护栏给出了可核对的自检标准')
+check(guardBody.includes('绝对不许'), '护栏是硬性措辞，不是「尽量」')
+
 console.log('\n== 4. 无底图时的图号偏移 ==')
 seen.length = 0
 await call(

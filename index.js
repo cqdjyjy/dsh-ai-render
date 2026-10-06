@@ -1552,11 +1552,20 @@ if (mode.id === 'style-transfer' && references.length === 0) {
       : noBase
         ? { width: 1536, height: 1024 }
         : fitSize(cad.width, cad.height, settings.maxSide)
-  // 把「画布比例」与「底图比例」一起交给提示词组装：两者差得多时要显式禁止
-  // 模型为了填满画布而重排结构（这是「结构经常被改」的一个直接成因）。
+  // 接口实际会收到的尺寸：gpt-image 系列只认三种固定尺寸，会被归一次。
+  //
+  // 这一步必须在组装提示词**之前**算，因为护栏要用「接口真正收到的画布比例」。
+  // 踩过的坑：以前这里传的是我们心里算的尺寸（如 1280x2048 = 0.625），
+  // 而接口实际收到 1024x1536（= 0.667），**差 7.1%** —— 模型为了填满画布
+  // 就会拉伸或重排分格（用户反馈：结构和比例还是被改了）。
+  const modelForSize =
+    provider === 'qwen' ? settings.dashscopeModel : provider === 'openai' ? settings.openaiModel : settings.arkModel
+  const intendedSize = `${size.width}x${size.height}`
+  const snappedSize = provider === 'openai' ? openAiEditSize(size, modelForSize) : intendedSize
+  const [canvasWidth, canvasHeight] = snappedSize.split('x').map(Number)
   const baseAr = cad && cad.width > 0 && cad.height > 0 ? cad.width / cad.height : 0
   const prompt = buildJobPrompt(settings, job, references.length, {
-    canvasAr: size.width / size.height,
+    canvasAr: canvasWidth / canvasHeight,
     baseAr,
   })
 
@@ -1586,9 +1595,9 @@ mode: settings.openaiMode,
   }
   let results
   let modeUsed
-  // 接口实际会收到的尺寸：gpt-image 系列只认三种固定尺寸，会被归一次。
-  const intended = `${size.width}x${size.height}`
-  const finalSize = provider === 'openai' ? openAiEditSize(size, payload.model) : intended
+  // 复用上面已经算好的归并结果（别再算一遍，免得两处漂移）
+  const intended = intendedSize
+  const finalSize = snappedSize
   const reportedSize = {
     size: finalSize,
     notice:

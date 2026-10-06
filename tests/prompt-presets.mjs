@@ -500,9 +500,10 @@ const canvasMismatch = composePrompt({
 })
 check(canvasMismatch.includes('【画布与主体】'), '画布比例与底图不一致时加了【画布与主体】护栏')
 check(
-  canvasMismatch.includes('不得为了填满画布而拉伸') && canvasMismatch.includes('重新排布结构'),
+  canvasMismatch.includes('为了填满画布而横向拉伸') && canvasMismatch.includes('重新排布'),
   '护栏明确禁止拉伸与重排结构',
 )
+check(/相差约 \d+%/.test(canvasMismatch), '护栏里带上了具体偏差百分比')
 const canvasSame = composePrompt({
   taskMode: 'elevation',
   stylePreset: 'cream',
