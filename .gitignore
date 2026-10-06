@@ -1,0 +1,32 @@
+# ---- 依赖与系统文件 ----
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+
+# ---- 本地敏感配置：绝不能提交 ----
+# API Key 实际存在 <DSH_HOME>/ai-render/settings.json（在插件目录之外），
+# 这里再兜一层，防止有人把设置文件拷进仓库。
+.settings.json
+settings.json
+settings.local.json
+*.key
+.env
+.env.*
+
+# ---- 生成产物 ----
+# 测试产出的成品图（本站实测 50MB+），不提交
+tests/out/
+out/
+output/
+history/
+temp/
+*.tmp
+
+# ---- 编辑器 ----
+.vscode/
+.idea/
+*.swp
+
+# 只在本机有意义的辅助脚本（含作者本地的附件绝对路径）
+tests/make-user-fixtures.py

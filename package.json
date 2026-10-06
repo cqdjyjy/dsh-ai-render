@@ -1,0 +1,39 @@
+{
+  "name": "@local/dsh-ai-render",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "通用 AI 效果图工作台：导入底图（立面施工图 / 手绘线稿 / 模型截图 / 实拍照片 / 平面图）+ 参考图，按参考图的材质、颜色与风格生成写实效果图",
+  "icon": "./icon.svg",
+  "meta": {
+    "title": "AI 效果图",
+    "description": "底图 + 参考图出写实效果图；11 种操作、29 个风格预设、机位三维度、比例可选、自动质检"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "presets.js",
+    "icon.svg",
+    "cordis.patch.yml",
+    "locale/*.json"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}

@@ -1,0 +1,39 @@
+- insert:
+    - id: ai-render
+      name: '@local/dsh-ai-render'
+      config:
+        arkApiKey: ''
+        arkModel: doubao-seedream-4-0-250828
+        dashscopeApiKey: ''
+        dashscopeModel: qwen-image-edit-plus
+        # 第三方中转站（OpenAI 兼容）。AILink 类站主力是异步任务接口：
+        # auto 会优先走 /v1/images/edits/async 再轮询 /v1/images/tasks/{id}。
+        openaiApiKey: ''
+        openaiBaseUrl: ''
+        openaiModel: gpt-image-2
+        # auto | async | async-linkai | edits | generations | chat
+        openaiMode: auto
+        # 异步任务专用：画质档位（留空 = 服务端默认 auto）、图生图模式
+        openaiQuality: ''
+        # ---- Google Gemini 通道（本机 Antigravity CLI agy，不需要 API Key）----
+        # 它不是生图 API，而是驱动一个有文件系统权限的 CLI agent：
+        # 图片靠「把文件路径写进提示词」传进去，出图靠扫 agy 数据目录里的新文件。
+        agyBin: agy
+        agyModel: gemini-3.7-flash-medium
+        # low | medium | high，留空 = 用 agy 默认
+        agyEffort: ''
+        # agy 数据目录，留空 = ~/.gemini/antigravity-cli
+        agyHome: ''
+        # agy 是 Go 程序，只认 HTTPS_PROXY；本机系统代理 PowerShell 能用但 agy 不会用
+        agyProxy: ''
+        openaiImageMode: image_to_image
+        # 同步 edits 形态的多图字段名：auto | image | image[]
+        openaiImageField: auto
+        # 同步 generations 形态是否把参考图放进 image 字段（1/0）
+        openaiIncludeRefs: '1'
+        defaultProvider: ark
+        outputDir: ''
+        maxSide: 2048
+        # 异步任务要排队 + 轮询，默认给足 10 分钟
+        timeoutMs: 600000
+        promptTemplate: ''

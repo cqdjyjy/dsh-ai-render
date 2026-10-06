@@ -1,0 +1,4 @@
+{
+  "title": "AI Render",
+  "description": "Bring a base image (elevation drawing, sketch, model screenshot, photo or floor plan) plus a reference image, and render a photoreal result in the reference's material, colour and style."
+}
