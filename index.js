@@ -46,7 +46,7 @@ import {
 } from './presets.js'
 
 export const name = 'ai-render'
-export { parseJobInput, fitSize, agyPrompt, harvestAgyImages, agyHomeDir, agyIndex, walkDir }
+export { parseJobInput, fitSize, serviceOf, agyPrompt, harvestAgyImages, agyHomeDir, agyIndex, walkDir }
 /**
  * 依赖声明。
  *
@@ -59,6 +59,32 @@ export { parseJobInput, fitSize, agyPrompt, harvestAgyImages, agyHomeDir, agyInd
  * 报 "waiting for services: required, optional"。数组是确定可用的形式。
  */
 export const inject = ['commands', 'attachments', 'sessions', 'llm', 'agentDefaultModel']
+
+/**
+ * 取宿主服务：两种访问方式都试。
+ *
+ *   1. 直接属性 —— DSH 的服务通常直接挂在 ctx 上（ctx.llm / ctx.agentDefaultModel）
+ *   2. ctx.get(name) —— Cordis 的通用取法
+ *
+ * 踩过的坑：只写 ctx.get() 时，AI 润色一直显示「内置模板（未走模型）」。
+ * 服务明明在（include:llm 与 include:agent-default-model 都是 active，
+ * 用 Inspect 确认过），但没取到，于是静默退回模板 —— 表现就是「润色没走模型」。
+ */
+function serviceOf(ctx, name) {
+  if (!ctx) return undefined
+  try {
+    const direct = ctx[name]
+    if (direct) return direct
+  } catch {
+    /* getter 抛错就当没有 */
+  }
+  try {
+    if (typeof ctx.get === 'function') return ctx.get(name)
+  } catch {
+    /* 同上 */
+  }
+  return undefined
+}
 
 /** cordis.patch.yml 。config 的默认值；设置文件可覆盖其中若干项。*/
 const DEFAULTS = {
@@ -1172,14 +1198,14 @@ async function expandPromptWithLlm(ctx, settings, job, invocation) {
     return assemble('', { rewritten: false, reason: '没写大白话，只用了基础框架。' })
   }
 
-  const llm = typeof ctx.get === 'function' ? ctx.get('llm') : undefined
+  const llm = serviceOf(ctx, 'llm')
   if (!llm) {
     return assemble(plain, { rewritten: false, reason: 'llm 服务不可用，已把你的原话直接附在框架后面。' })
   }
 
   let selection
   try {
-    selection = ctx.get('agentDefaultModel')?.currentSelection()
+    selection = serviceOf(ctx, 'agentDefaultModel')?.currentSelection()
   } catch {
     selection = undefined
   }
@@ -1202,8 +1228,8 @@ async function expandPromptWithLlm(ctx, settings, job, invocation) {
       rewritten: false,
       reason:
         '未解析到默认模型，已把你的原话直接附在框架后面。' +
-        `（诊断：agentDefaultModel=${ctx.get('agentDefaultModel') ? '有' : '无'}，` +
-        `llm=${ctx.get('llm') ? '有' : '无'}）`,
+        `（诊断：agentDefaultModel=${serviceOf(ctx, 'agentDefaultModel') ? '有' : '无'}，` +
+        `llm=${serviceOf(ctx, 'llm') ? '有' : '无'}）`,
     })
   }
 
@@ -1280,11 +1306,11 @@ async function readStructureWithLlm(ctx, job, invocation) {
     // 参考图对读结构没帮助，只用第一张（CAD）。
 }
 
-  const llm = typeof ctx.get === 'function' ? ctx.get('llm') : undefined
+  const llm = serviceOf(ctx, 'llm')
   if (!llm) throw new Error('llm 服务不可用，读图功能无法使用。')
   let selection
   try {
-    selection = ctx.get('agentDefaultModel')?.currentSelection()
+    selection = serviceOf(ctx, 'agentDefaultModel')?.currentSelection()
   } catch {
     selection = undefined
   }
@@ -1373,11 +1399,11 @@ const detail = [
 async function reviewRender(ctx, job, invocation, renderPath) {
   const cadBlock = (invocation.attachments ?? []).find((block) => block?.type === 'image')
   if (!cadBlock) return null
-  const llm = typeof ctx.get === 'function' ? ctx.get('llm') : undefined
+  const llm = serviceOf(ctx, 'llm')
   if (!llm) return null
   let selection
   try {
-    selection = ctx.get('agentDefaultModel')?.currentSelection()
+    selection = serviceOf(ctx, 'agentDefaultModel')?.currentSelection()
   } catch {
     selection = undefined
   }

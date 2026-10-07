@@ -567,7 +567,7 @@ console.log('\n== 3f. API Key 必须能原样送达（base64 传输） ==')
 // 根因：面板把整个 job 拼进**命令行字符串**，命令行会过命令解析器
 // （引号 / 反斜杠 / 空白 / 转义）—— Key 里含这些字符就被改写了。
 // 现在面板改传 base64url，宿主两种都认。
-const { parseJobInput, fitSize } = await import(`file://${path.join(root, 'index.js').replaceAll('\\', '/')}`)
+const { parseJobInput, fitSize, serviceOf } = await import(`file://${path.join(root, 'index.js').replaceAll('\\', '/')}`)
 const b64 = (obj) => Buffer.from(JSON.stringify(obj), 'utf8').toString('base64url')
 const arkKey = 'AKLTZmY2NDk4-NzA0OS00MjM0LWI5ZjctY2Q0YzE'
 check(parseJobInput(b64({ action: 'configure', arkApiKey: arkKey })).arkApiKey === arkKey, 'base64 传输：火山方舟 Key 原样还原')
@@ -610,6 +610,19 @@ for (const [tier, side] of Object.entries(SIDES)) {
 }
 // 4K 不能被 2048 的上限压回去（踩过：上限卡在 2048 时 4K 选了也没用）
 check(Math.max(fitSize(272, 437, 4096).width, fitSize(272, 437, 4096).height) > 3000, '4K 不再被 2048 上限压回')
+
+console.log('\n== 3i. 取宿主服务：两种访问方式都要能用 ==')
+// 用户反馈「AI 润色：内置模板（未走模型）」。服务在宿主里明明 active，
+// 但只写 ctx.get() 时取不到，于是静默退回模板。这里两种方式都必须能取到。
+const svcLlm = { name: 'llm' }
+const svcModel = { name: 'agentDefaultModel' }
+check(serviceOf({ llm: svcLlm }, 'llm') === svcLlm, '直接属性可取值（ctx.llm）')
+check(serviceOf({ get: (k) => (k === 'llm' ? svcLlm : undefined) }, 'llm') === svcLlm, 'ctx.get 可取值')
+check(serviceOf({ llm: svcLlm, get: () => undefined }, 'llm') === svcLlm, '两者都有时优先直接属性')
+check(serviceOf({ get: () => undefined }, 'llm') === undefined, '都没有时返回 undefined（不能抛）')
+check(serviceOf(undefined, 'llm') === undefined, 'ctx 为空也不抛')
+check(serviceOf({ get() { throw new Error('boom') } }, 'llm') === undefined, 'get 抛错时静默返回 undefined')
+check(serviceOf({ get llm() { throw new Error('boom') } }, 'llm') === undefined, '属性 getter 抛错也不崩')
 
 console.log('\n== 4. 无底图时的图号偏移 ==')
 seen.length = 0
