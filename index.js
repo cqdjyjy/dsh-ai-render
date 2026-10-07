@@ -1209,20 +1209,20 @@ async function expandPromptWithLlm(ctx, settings, job, invocation) {
   } catch {
     selection = undefined
   }
-  let provider = selection?.provider
-  let model = selection?.model
-  if (!provider || !model) {
-    // 兜底：当前会话的 Agent 身上通常挂着它正在用的模型，比直接放弃好。
-    try {
-      const live = invocation?.agent?.model ?? invocation?.agent?.header?.model
-      if (live?.provider && live?.model) {
-        provider = live.provider
-        model = live.model
-      }
-    } catch {
-      /* 拿不到就算了 */
-    }
+  // 先取「当前会话正在用的模型」。
+  //
+  // 为什么优先它而不是全局默认模型：用户正在用它跟我对话，说明这个提供商
+  // 的凭据一定是好的；而全局默认模型可能指向一个没配好 Key 的提供商。
+  // 踩过的坑：默认模型指向走方舟的提供商，润色直接 401
+  // （"the API key or AK/SK in the request is missing or invalid"，code AUTH）。
+  let live
+  try {
+    live = invocation?.agent?.model ?? invocation?.agent?.header?.model
+  } catch {
+    live = undefined
   }
+  let provider = live?.provider || selection?.provider
+  let model = live?.model || selection?.model
   if (!provider || !model) {
     return assemble(plain, {
       rewritten: false,
@@ -1285,7 +1285,8 @@ async function expandPromptWithLlm(ctx, settings, job, invocation) {
       return assemble(plain, {
         rewritten: false,
         reason:
-          `模型没有返回文字内容（text-delta ${textDeltas.length} 段 / reasoning ${reasoningDeltas.length} 段 / ` +
+          `模型没有返回文字内容（用的是 ${provider}/${model}；` +
+          `text-delta ${textDeltas.length} 段 / reasoning ${reasoningDeltas.length} 段 / ` +
           `结束原因 ${finish ? JSON.stringify(finish) : '未收到 finish 块'}），已把你的原话直接附在框架后面。`,
       })
     }
