@@ -928,10 +928,25 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
     }
 
     /** 调用宿主命令。Remote 返回 { ok, value } | { ok, error } 信封。 */
+    /**
+     * 把参数编码成 base64url 再塞进命令行。
+     *
+     * 这是踩坑换来的：原先直接 `JSON.stringify(job)` 拼进命令行，而命令行
+     * 会过命令解析器（处理引号 / 反斜杠 / 空白 / 转义）。API Key 里只要出现
+     * 这些字符就会被改写 —— 用户看到的现象就是「填了 Key 但没保存成功」。
+     * base64url 只含 A-Za-z0-9-_，解析器不会再动它。宿主两种格式都认。
+     */
+    function encodeJob(job) {
+      const bytes = new TextEncoder().encode(JSON.stringify(job))
+      let binary = ''
+      for (const byte of bytes) binary += String.fromCharCode(byte)
+      return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    }
+
     async function callCommand(ctx, sessionId, job, attachments) {
       const envelope = await ctx.remote.commands.execute(
         sessionId,
-        `/${COMMAND} ${JSON.stringify(job)}`,
+        `/${COMMAND} ${encodeJob(job)}`,
         attachments,
       )
       if (!envelope || envelope.ok !== true) {
@@ -1867,7 +1882,18 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
           try {
             const info = await callCommand(ctx, sessionId, { action: 'configure', ...patch }, [])
             setStatus(info)
-            setNote(info.saved ? '已保存。' : '')
+            // 保存后必须说清楚「哪个通道现在能用」——否则用户填了 Key 却不知道
+            // 到底存没存进去、为什么出图还报未配置（反馈过「填了实际没生效」）。
+            const ready = [
+              info.ark?.configured ? '火山方舟' : '',
+              info.qwen?.configured ? '通义万相' : '',
+              info.openai?.configured ? '中转站' : '',
+            ].filter(Boolean)
+            setNote(
+              info.saved
+                ? `已保存。当前可用通道：${ready.length > 0 ? ready.join(' / ') : '（无 —— 请确认 Key 已粘贴到输入框再点保存）'}`
+                : '',
+            )
           } catch (failure) {
             setError(String(failure?.message ?? failure))
           } finally {

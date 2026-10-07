@@ -606,11 +606,36 @@ check(!manual.includes('不是重新设计'), '手动改图分支不带任务性
 // 文生图没有图1，也不该带
 const text2img = composePrompt({ taskMode: 'text2img', stylePreset: 'cream', referenceCount: 0 })
 check(!text2img.includes('【交付前自检】'), '文生图没有底图，不带自检段')
+check(!text2img.includes('不是重新设计'), '文生图没有底图，不带首句约束')
 
 console.log('\n== 24. 负向提示词 ==')
 check(NEGATIVE_PROMPT.includes('结构改变') && NEGATIVE_PROMPT.includes('尺寸标注'), '内置负向词含关键项')
 check(composeNegative('紫红色') === `${NEGATIVE_PROMPT}, 紫红色`, '自定义负向词追加在末尾')
 check(composeNegative('') === NEGATIVE_PROMPT, '空的自定义负向词不产生多余逗号')
+
+console.log('\n== 29. 默认提示词五金细节必须严格以底图为准（不能硬编码免拉手/明拉手） ==')
+const defaultElevation = composePrompt({ taskMode: 'elevation', stylePreset: 'modern', referenceCount: 1 })
+check(defaultElevation.includes('【五金细节】'), '立面模式包含五金细节段')
+check(defaultElevation.includes('严格以图1底图为准'), '五金段明确要求严格以图1底图为准')
+check(
+  defaultElevation.includes('底图为免拉手则做免拉手') &&
+    defaultElevation.includes('为反弹器无拉手则做无拉手') &&
+    defaultElevation.includes('为明拉手则做明拉手'),
+  '五金段列出免拉手、反弹器无拉手、明拉手三种情况，要求按底图',
+)
+check(!defaultElevation.includes('极窄通体隐藏拉手或指扣免拉手'), '默认立面提示词绝不硬编码极窄通体隐藏拉手或指扣免拉手')
+check(defaultElevation.includes('金属件为哑光黑或拉丝镍'), '保留了现代简约风格的金属工艺描述')
+const defaultText2img = composePrompt({ taskMode: 'text2img', stylePreset: 'modern', referenceCount: 0 })
+check(defaultText2img.includes('免拉手或极窄隐藏拉手'), '文生图无底图时才回落到风格预设的拉手建议')
+check(!defaultText2img.includes('以图1底图为准'), '文生图没有底图，不能要求「照底图」')
+console.log('\n== 30. 有参考图时材质色彩完全依据参考图（不得硬塞模板拼色或台面石材） ==')
+check(defaultElevation.includes('材质、颜色、纹理与表面工艺完全以图2为准'), '有参考图时材质明确以图2为准')
+check(!defaultElevation.includes('暖白与浅灰大面积拼色'), '有参考图时绝不硬塞现代简约模板的拼色')
+check(!defaultElevation.includes('深灰细砂石英石'), '有参考图时绝不硬塞现代简约模板的石英石台面')
+check(
+  !defaultElevation.includes('素色乳胶漆墙面与浅灰微水泥地面'),
+  '立面底图模式下空间环境不硬塞微水泥地面',
+)
 
 console.log(failures === 0 ? '\nPRESETS TEST PASSED' : `\nPRESETS TEST FAILED (${failures})`)
 process.exit(failures === 0 ? 0 : 1)

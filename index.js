@@ -46,7 +46,7 @@ import {
 } from './presets.js'
 
 export const name = 'ai-render'
-export { agyPrompt, harvestAgyImages, agyHomeDir, agyIndex, walkDir }
+export { parseJobInput, agyPrompt, harvestAgyImages, agyHomeDir, agyIndex, walkDir }
 export const inject = ['commands', 'attachments', 'sessions']
 
 /** cordis.patch.yml 。config 的默认值；设置文件可覆盖其中若干项。*/
@@ -498,7 +498,10 @@ function buildJobPrompt(settings, job, referenceCount, sizing = {}) {
   const structure = typeof job.structure === 'string' ? job.structure.trim() : ''
   // 「分析图」这类操作会额外注入一段类型说明。
 const diagram = typeof job.diagram === 'string' ? job.diagram.trim() : ''
-  const budget = !structure && normalizeProvider(job.provider, settings.defaultProvider) === 'ark' ? 300 : 0
+    // 即梦官方「建议」≤300 字，但那只是建议。300 会逼着我们在
+  // 「客户原话」和「清除施工图元素」之间二选一 —— 两个都不该丢，
+  // 所以给到 600（仍远低于模型的上限）。
+  const budget = !structure && normalizeProvider(job.provider, settings.defaultProvider) === 'ark' ? 600 : 0
   return composePrompt({
     taskMode: job.taskMode,
     stylePreset: job.stylePreset,
@@ -591,6 +594,35 @@ async function appendHistory(entry) {
  * 手工编辑这个文件很容易踩两个坑，都会表现成「保存了但没生效」：
  *   1. 记事本可能写。UTF-8 BOM，JSON.parse 遇到 BOM 直接抛错。*   2. JSON 语法错（中文引号、路径里的反斜杠没转义、多一个逗号）。* BOM 直接剥掉；语法错必须报出来，绝不静默吞掉 —。静默吞掉正是
  * 「我明明保存了却没生效」这种反馈的根源。*/
+/**
+ * 解析面板 / Agent 传来的参数。
+ *
+ * 为什么还要支持 base64：面板是把整个 job 塞进**命令行字符串**发过来的
+ * （`/ai-render {…}`），而命令行要过命令解析器 —— 它会处理引号、反斜杠、
+ * 空白和转义。API Key 里一旦出现这些字符，传过来的内容就被改写了，
+ * 表现就是「填了 Key 但没保存成功 / 点了保存没反应」。
+ * 所以面板改成传 base64url（只含 A-Za-z0-9-_），这里两种都认，老客户端也不受影响。
+ */
+function parseJobInput(raw) {
+  const text = String(raw ?? '').trim()
+  if (!text) return {}
+  if (text.startsWith('{')) {
+    try {
+      return JSON.parse(text)
+    } catch {
+      return null
+    }
+  }
+  // base64url → UTF-8 → JSON
+  try {
+    const normalized = text.replace(/-/g, '+').replace(/_/g, '/')
+    const decoded = Buffer.from(normalized, 'base64').toString('utf8')
+    return JSON.parse(decoded)
+  } catch {
+    return null
+  }
+}
+
 async function readSettings() {
   let text
   try {
@@ -1689,11 +1721,11 @@ export function apply(ctx, rawConfig = {}) {
       let job = {}
       const raw = (invocation.rawInput ?? '').trim()
       if (raw) {
-        try {
-          job = JSON.parse(raw)
-        } catch {
-          return { kind: 'error', text: `参数不是合法 JSON：${raw.slice(0, 200)}` }
+        const parsed = parseJobInput(raw)
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return { kind: 'error', text: `参数无法解析（既不是合法 JSON，也不是合法 base64）：${raw.slice(0, 200)}` }
         }
+        job = parsed
       }
       const session = ctx.sessions.get(invocation.agent.id)
       const cwd = session?.header?.cwd

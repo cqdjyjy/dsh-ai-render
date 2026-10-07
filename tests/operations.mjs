@@ -346,9 +346,16 @@ check(composed.by === 'deepseek-account/deepseek-flash', '回报了实际使用�
 const base = String(composed.base ?? '')
 check(base.length > 300, `基础框架存在（${base.length} 字）`)
 check(base.includes('【结构锁死】') && base.includes('【材质色彩】'), '框架含结构约束与材质段落')
-check(base.includes('奶油白'), '框架含所选风格（奶油风）的材质描述')
+// 材质不再写死风格模板：有参考图时以参考图为准（用户明确要求「材质要看图不看模板」）。
+// 所以这里改为断言『框架把材质来源指向了图』而不是断言出现某个模板材料名。
+check(
+  base.includes('以图2为准') || base.includes('以【图纸规定】为准'),
+  '框架的材质来源指向参考图 / 图纸，而不是写死的风格模板',
+)
 check(!base.includes('【补充要求】'), '框架里不含大白话（大白话走第 2 段）')
 check(String(composed.prompt).startsWith(base), '最终提示词以基础框架开头（框架没被顶掉）')
+check(base.includes('严禁擅自拼色'), '框架锁死材质一致性（严禁擅自拼色）')
+check(base.includes('同一材质') || base.includes('同类构件'), '框架锁死同材质一致规则')
 
 // 框架里的图纸规格必须跟读图结果走：漏传 structure 就会「一点润色，
 // 图纸读出来的材质颜色五金全丢」—— 那是框架里最不该丢的东西。
@@ -554,6 +561,21 @@ check(guardBody.includes('画布与主体'), '画布被归并时护栏进了提�
 check(/相差约 ?7%/.test(guardBody), '护栏里带了具体偏差百分比（7%）')
 check(guardBody.includes('每一格的长宽比'), '护栏给出了可核对的自检标准')
 check(guardBody.includes('绝对不许'), '护栏是硬性措辞，不是「尽量」')
+
+console.log('\n== 3f. API Key 必须能原样送达（base64 传输） ==')
+// 用户反馈「添加 API Key 没有保存功能，填了实际没生效」。
+// 根因：面板把整个 job 拼进**命令行字符串**，命令行会过命令解析器
+// （引号 / 反斜杠 / 空白 / 转义）—— Key 里含这些字符就被改写了。
+// 现在面板改传 base64url，宿主两种都认。
+const { parseJobInput } = await import(`file://${path.join(root, 'index.js').replaceAll('\\', '/')}`)
+const b64 = (obj) => Buffer.from(JSON.stringify(obj), 'utf8').toString('base64url')
+const arkKey = 'AKLTZmY2NDk4-NzA0OS00MjM0LWI5ZjctY2Q0YzE'
+check(parseJobInput(b64({ action: 'configure', arkApiKey: arkKey })).arkApiKey === arkKey, 'base64 传输：火山方舟 Key 原样还原')
+check(parseJobInput(JSON.stringify({ action: 'status' })).action === 'status', '旧的 JSON 传输仍然兼容（老客户端不受影响）')
+const nasty = 'ak"with\'quote\\and space+slash/equals='
+check(parseJobInput(b64({ dashscopeApiKey: nasty })).dashscopeApiKey === nasty, '含引号/反斜杠/空格/+= 的 Key 也能原样还原')
+check(parseJobInput('这不是base64也不是json') === null, '非法输入返回 null（上层给出可读报错）')
+check(parseJobInput('').action === undefined && typeof parseJobInput('') === 'object', '空输入返回空对象')
 
 console.log('\n== 4. 无底图时的图号偏移 ==')
 seen.length = 0
