@@ -1209,20 +1209,25 @@ async function expandPromptWithLlm(ctx, settings, job, invocation) {
   } catch {
     selection = undefined
   }
-  // 先取「当前会话正在用的模型」。
+  // 取「DSH 此刻正在对话用的模型」。
   //
-  // 为什么优先它而不是全局默认模型：用户正在用它跟我对话，说明这个提供商
-  // 的凭据一定是好的；而全局默认模型可能指向一个没配好 Key 的提供商。
-  // 踩过的坑：默认模型指向走方舟的提供商，润色直接 401
-  // （"the API key or AK/SK in the request is missing or invalid"，code AUTH）。
-  let live
+  // 正确来源是 Session 上的 requestContext() —— 它返回当前这次请求的
+  // { provider, model }（类型见 DSH 的 RequestContext）。requestHeader().config
+  // 是同一件事的另一种记录，作为次选。
+  //
+  // 走过两条弯路，写下来免得再犯：
+  //   1. 以为 invocation.agent 上挂着 model —— 其实 Agent 接口只有 { id }。
+  //   2. 那就只剩 agentDefaultModel.currentSelection()，但它是「全局默认」，
+  //      可能指向一个 Key 没配好的提供商，于是出现「我能对话，润色却 401」。
+  let current
   try {
-    live = invocation?.agent?.model ?? invocation?.agent?.header?.model
+    const session = serviceOf(ctx, 'sessions')?.get(invocation.agent.id)
+    current = session?.requestContext?.() ?? session?.requestHeader?.()?.config
   } catch {
-    live = undefined
+    current = undefined
   }
-  let provider = live?.provider || selection?.provider
-  let model = live?.model || selection?.model
+  let provider = current?.provider || selection?.provider
+  let model = current?.model || selection?.model
   if (!provider || !model) {
     return assemble(plain, {
       rewritten: false,
