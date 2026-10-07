@@ -38,7 +38,9 @@ window.__ModuleLoader__.load({
      */
     const MODEL_PRESETS = {
       ark: [
-        { id: 'doubao-seedream-5-0-pro', hint: 'Seedream 5.0 pro · 最新' },
+        { id: 'doubao-seedream-5.0-pro', hint: 'Seedream 5.0 pro · Agent Plan' },
+        { id: 'doubao-seedream-5.0-lite', hint: 'Seedream 5.0 lite · Agent Plan' },
+        { id: 'doubao-seedream-5-0-pro', hint: 'Seedream 5.0 pro · 标准方舟' },
         { id: 'doubao-seedream-4-0-250828', hint: 'Seedream 4.0 · 文生图 / 图生图' },
         { id: 'doubao-seedream-3-0-t2i-250415', hint: 'Seedream 3.0 · 文生图' },
         { id: 'doubao-seededit-3-0-i2i-250628', hint: 'SeedEdit 3.0 · 图生图（按底图改）' },
@@ -1407,6 +1409,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       const [qwenKey, setQwenKey] = React.useState('')
       // 各家模型的型号可以选（方舟/百炼的型号换得很勤，写死一个迟早过期）。
       const [arkModelInput, setArkModelInput] = React.useState('')
+      const [arkBaseUrlInput, setArkBaseUrlInput] = React.useState('')
       const [qwenModelInput, setQwenModelInput] = React.useState('')
       const [saving, setSaving] = React.useState(false)
       const [relayUrl, setRelayUrl] = React.useState('')
@@ -1865,6 +1868,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
             setStatus(info)
             // 把当前生效的型号回填到输入框（用户可能想换个型号）
             setArkModelInput(info.ark?.model ?? '')
+            setArkBaseUrlInput(info.ark?.baseUrl ?? '')
             setQwenModelInput(info.qwen?.model ?? '')
             setRelayUrl(info.openai?.baseUrl ?? '')
             setRelayModel(info.openai?.model ?? '')
@@ -2156,6 +2160,38 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               )
             }),
 
+            // 方舟 Base URL：Agent Plan 套餐必须用带 /plan 的地址，否则调不通
+            // 或产生额外费用（官方文档明确写了「请勿混用其他 API 接口」）。
+            h(
+              'div',
+              { className: 'cr-slider-sources', style: { marginTop: '4px' } },
+              h('span', { className: 'cr-note' }, '方舟地址'),
+              h('input', {
+                className: 'cr-ta',
+                style: { minHeight: 'auto', padding: '7px 9px', flex: '1 1 200px' },
+                type: 'text',
+                autoComplete: 'off',
+                placeholder: 'Base URL（留空 = 标准方舟）',
+                value: arkBaseUrlInput,
+                onChange: (event) => setArkBaseUrlInput(event.target.value),
+              }),
+              ...[
+                { id: 'https://ark.cn-beijing.volces.com/api/plan/v3', label: 'Agent Plan' },
+                { id: 'https://ark.cn-beijing.volces.com/api/v3', label: '标准方舟' },
+              ].map((item) =>
+                h(
+                  'button',
+                  {
+                    key: item.label,
+                    className: 'cr-chip',
+                    type: 'button',
+                    'data-active': arkBaseUrlInput === item.id ? '1' : '0',
+                    onClick: () => setArkBaseUrlInput(item.id),
+                  },
+                  item.label,
+                ),
+              ),
+            ),
             // 第三方中转站（OpenAI 兼容）
             h('div', { className: 'cr-label', style: { marginTop: '6px' } }, 'OpenAI 兼容中转站'),
             h('input', {
@@ -2260,6 +2296,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
                     if (relayUrl.trim()) patch.openaiBaseUrl = relayUrl.trim()
                     if (relayModel.trim()) patch.openaiModel = relayModel.trim()
                     if (arkModelInput.trim()) patch.arkModel = arkModelInput.trim()
+                    if (arkBaseUrlInput.trim()) patch.arkBaseUrl = arkBaseUrlInput.trim()
                     if (qwenModelInput.trim()) patch.dashscopeModel = qwenModelInput.trim()
                     patch.openaiMode = relayMode
                     await saveKeys(patch)

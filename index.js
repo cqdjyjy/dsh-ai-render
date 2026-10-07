@@ -97,6 +97,7 @@ autoQc: '1',
 const SETTABLE = [
   'arkApiKey',
   'arkModel',
+  'arkBaseUrl',
   'dashscopeApiKey',
   'dashscopeModel',
   'openaiApiKey',
@@ -726,24 +727,34 @@ async function downloadImage(url, signal) {
 /** 火山方舟 · 即梦 Seedream：支持多图参。+ 组图输出。*/
 async function callArk({ apiKey, baseUrl, model, prompt, images, size, count, signal }) {
   const dataUrls = images.map((image) => image.dataUrl)
-  const body = {
-    model,
-    prompt,
-    image: dataUrls.length === 1 ? dataUrls[0] : dataUrls,
-    size: `${size.width}x${size.height}`,
-    response_format: 'b64_json',
-    watermark: false,
+  const buildBody = (sizeValue) => {
+    const body = {
+      model,
+      prompt,
+      image: dataUrls.length === 1 ? dataUrls[0] : dataUrls,
+      size: sizeValue,
+      response_format: 'b64_json',
+      watermark: false,
+    }
+    if (count > 1) {
+      body.sequential_image_generation = 'auto'
+      body.sequential_image_generation_options = { max_images: count }
+    }
+    return body
   }
-  if (count > 1) {
-    body.sequential_image_generation = 'auto'
-    body.sequential_image_generation_options = { max_images: count }
+  const url = `${baseUrl.replace(/\/+$/, '')}/images/generations`
+  const headers = { authorization: `Bearer ${apiKey}` }
+  let json
+  try {
+    // 优先发像素尺寸：我们要的是「画布比例和底图一致」，这是压住结构被改的关键。
+    json = await postJson(url, headers, buildBody(`${size.width}x${size.height}`), signal)
+  } catch (failure) {
+    // 但各家对 size 的接受范围不一致（Agent Plan 的示例用的是 "2K" 这种档位字符串）。
+    // 像素被拒时退回档位写法再试一次 —— 总比直接失败好，用户至少能拿到图。
+    const text = String(failure?.message ?? failure)
+    if (!/size|尺寸|分辨率|resolution|宽高|invalid/i.test(text)) throw failure
+    json = await postJson(url, headers, buildBody('2K'), signal)
   }
-  const json = await postJson(
-    `${baseUrl.replace(/\/+$/, '')}/images/generations`,
-    { authorization: `Bearer ${apiKey}` },
-    body,
-    signal,
-  )
   const list = Array.isArray(json?.data) ? json.data : []
   const out = []
   for (const item of list) {
@@ -1689,7 +1700,11 @@ function statusOf(settings, cwd, settingsError = '') {
   return {
     ok: true,
     action: 'status',
-    ark: { configured: Boolean(apiKeyOf(settings, 'ark')), model: settings.arkModel },
+    ark: {
+        configured: Boolean(apiKeyOf(settings, 'ark')),
+        model: settings.arkModel,
+        baseUrl: settings.arkBaseUrl,
+      },
     qwen: { configured: Boolean(apiKeyOf(settings, 'qwen')), model: settings.dashscopeModel },
     openai: {
       configured: Boolean(apiKeyOf(settings, 'openai') && normalizeOpenAiBase(settings.openaiBaseUrl)),
