@@ -47,7 +47,20 @@ import {
 
 export const name = 'ai-render'
 export { parseJobInput, agyPrompt, harvestAgyImages, agyHomeDir, agyIndex, walkDir }
-export const inject = ['commands', 'attachments', 'sessions']
+/**
+ * 依赖声明。
+ *
+ * `llm` / `agentDefaultModel` 必须在这里声明 —— 否则 `ctx.get('llm')` 拿到的是
+ * undefined，AI 润色会静默退回内置模板，用户看到的就是「AI 润色没走模型」。
+ * 踩过的坑：这两个服务在宿主里明明存在，但没注入就用不到。
+ *
+ * 用 optional 而不是 required：老版本 DSH 没有这两个服务时，插件仍要能加载
+ * （润色降级为「原话直接附在框架后」，出图不受影响）。
+ */
+export const inject = {
+  required: ['commands', 'attachments', 'sessions'],
+  optional: ['llm', 'agentDefaultModel'],
+}
 
 /** cordis.patch.yml 。config 的默认值；设置文件可覆盖其中若干项。*/
 const DEFAULTS = {
@@ -181,7 +194,7 @@ function stamp(date = new Date()) {
 
 /** 按原图长宽比求出图的整数尺寸：每条边都落在 [512,2048] 且是 16 的倍数。*/
 function fitSize(srcWidth, srcHeight, maxSide) {
-  const cap = Math.min(2048, Math.max(768, Number(maxSide) || 2048))
+  const cap = Math.min(4096, Math.max(768, Number(maxSide) || 2048))
   const ar = srcWidth > 0 && srcHeight > 0 ? srcWidth / srcHeight : 4 / 3
   let width = ar >= 1 ? cap : Math.round(cap * ar)
   let height = ar >= 1 ? Math.round(cap / ar) : cap
@@ -1170,10 +1183,28 @@ async function expandPromptWithLlm(ctx, settings, job, invocation) {
   } catch {
     selection = undefined
   }
-  const provider = selection?.provider
-  const model = selection?.model
+  let provider = selection?.provider
+  let model = selection?.model
   if (!provider || !model) {
-    return assemble(plain, { rewritten: false, reason: '未解析到默认模型，已把你的原话直接附在框架后面。' })
+    // 兜底：当前会话的 Agent 身上通常挂着它正在用的模型，比直接放弃好。
+    try {
+      const live = invocation?.agent?.model ?? invocation?.agent?.header?.model
+      if (live?.provider && live?.model) {
+        provider = live.provider
+        model = live.model
+      }
+    } catch {
+      /* 拿不到就算了 */
+    }
+  }
+  if (!provider || !model) {
+    return assemble(plain, {
+      rewritten: false,
+      reason:
+        '未解析到默认模型，已把你的原话直接附在框架后面。' +
+        `（诊断：agentDefaultModel=${ctx.get('agentDefaultModel') ? '有' : '无'}，` +
+        `llm=${ctx.get('llm') ? '有' : '无'}）`,
+    })
   }
 
   try {
@@ -1598,13 +1629,20 @@ if (mode.id === 'style-transfer' && references.length === 0) {
   const explicit = typeof job.size === 'string' && /^\d+x\d+$/.test(job.size.trim()) ? job.size.trim() : null
   // 尺寸优先级：调用方显式给的 WxH > 用户选的比例 > 跟随底图 > 文生图默认
   const ratioSize = sizeFromRatio(resolveRatio(job.ratio), settings.maxSide)
+  // 分辨率档位 → 像素上限。
+  //
+  // 为什么不直接把 "2K" 档位字符串发给接口：那样画布比例就由接口决定，
+  // 底图 0.62 的竖图会被塞进 0.67 的画布 —— 模型为了填满而拉伸/重排，
+  // 结构又会被改。所以「分辨率」只决定**像素上限**，比例始终跟随底图。
+  const RESOLUTION_SIDES = { '1K': 1024, '2K': 2048, '4K': 4096 }
+  const resolutionSide = RESOLUTION_SIDES[String(job.resolution ?? '').toUpperCase()] || 0
   const size = explicit
     ? { width: Number(explicit.split('x')[0]), height: Number(explicit.split('x')[1]) }
     : ratioSize
       ? ratioSize
       : noBase
         ? { width: 1536, height: 1024 }
-        : fitSize(cad.width, cad.height, settings.maxSide)
+        : fitSize(cad.width, cad.height, resolutionSide || settings.maxSide)
   // 接口实际会收到的尺寸：gpt-image 系列只认三种固定尺寸，会被归一次。
   //
   // 这一步必须在组装提示词**之前**算，因为护栏要用「接口真正收到的画布比例」。

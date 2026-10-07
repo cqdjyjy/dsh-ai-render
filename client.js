@@ -1338,6 +1338,8 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       const [cameraElevation, setCameraElevation] = React.useState('inherit')
       const [cameraDistance, setCameraDistance] = React.useState('inherit')
       const [ratio, setRatio] = React.useState('follow')
+      // 分辨率档位。只决定像素上限，画布比例始终跟随底图（否则结构会被改）。
+      const [resolution, setResolution] = React.useState('follow')
       const [autoQc, setAutoQc] = React.useState(true)
       const [stages, setStages] = React.useState([])
       const [busy, setBusy] = React.useState(false)
@@ -1575,6 +1577,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               cameraElevation,
               cameraDistance,
               ratio,
+              resolution,
               diagram,
               plain,
               promptOverride: composed,
@@ -1685,6 +1688,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         cameraElevation,
         cameraDistance,
         ratio,
+        resolution,
         autoQc,
         catalog,
         refineFrom,
@@ -1784,6 +1788,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         if (record.camera) setCamera(record.camera)
         if (record.diagram) setDiagram(record.diagram)
         if (record.ratio) setRatio(record.ratio)
+        if (record.resolution) setResolution(record.resolution)
         setStructure(typeof record.structure === 'string' ? record.structure : '')
         setPlain(typeof record.plain === 'string' ? record.plain : '')
         setComposed(typeof record.promptOverride === 'string' ? record.promptOverride : '')
@@ -2704,6 +2709,35 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
                 'span',
                 { className: 'cr-note', style: { marginLeft: '6px', fontWeight: 400 } },
                 ratio === 'follow' ? '按底图长宽比出图' : `已指定 ${ratio}（实际尺寸看结果里的回报）`,
+              ),
+            ),
+            // 分辨率：只改像素上限，比例仍跟随底图
+            h(
+              'div',
+              { className: 'cr-row', style: { padding: '0 10px' } },
+              h('span', { className: 'cr-label', style: { margin: 0 } }, '分辨率'),
+              ...[
+                { id: 'follow', label: '自动', side: 0 },
+                { id: '1K', label: '1K', side: 1024 },
+                { id: '2K', label: '2K', side: 2048 },
+                { id: '4K', label: '4K', side: 4096 },
+              ].map((item) =>
+                h(
+                  'button',
+                  {
+                    key: item.id,
+                    className: 'cr-chip',
+                    type: 'button',
+                    'data-active': resolution === item.id ? '1' : '0',
+                    disabled: busy,
+                    title:
+                      item.side === 0
+                        ? '用设置里的像素上限自动决定'
+                        : `${item.label}：最长边约 ${item.side} 像素，比例仍跟随底图`,
+                    onClick: () => setResolution(item.id),
+                  },
+                  item.label,
+                ),
               ),
             ),
             h(
