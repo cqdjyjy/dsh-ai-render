@@ -37,13 +37,14 @@ window.__ModuleLoader__.load({
      * 写死迟早过期；但完全空着用户又不知道该填什么，所以给常用项 + 自由输入。
      */
     const MODEL_PRESETS = {
+      // 型号能不用不是看官网有没有，而是看**你这个套餐开没开**。
+      // 实测（Agent Plan · 2026-10）：只有 doubao-seedream-5.0-pro 可用，
+      // 连官方文档示例里的 5.0-lite 都返回 UnsupportedModel。
       ark: [
-        { id: 'doubao-seedream-5.0-pro', hint: 'Seedream 5.0 pro · Agent Plan' },
-        { id: 'doubao-seedream-5.0-lite', hint: 'Seedream 5.0 lite · Agent Plan' },
-        { id: 'doubao-seedream-5-0-pro', hint: 'Seedream 5.0 pro · 标准方舟' },
-        { id: 'doubao-seedream-4-0-250828', hint: 'Seedream 4.0 · 文生图 / 图生图' },
-        { id: 'doubao-seedream-3-0-t2i-250415', hint: 'Seedream 3.0 · 文生图' },
-        { id: 'doubao-seededit-3-0-i2i-250628', hint: 'SeedEdit 3.0 · 图生图（按底图改）' },
+        { id: 'doubao-seedream-5.0-pro', hint: 'Seedream 5.0 pro · Agent Plan 可用' },
+        { id: 'doubao-seedream-5.0-lite', hint: 'Seedream 5.0 lite · 部分套餐不支持' },
+        { id: 'doubao-seedream-4-0-250828', hint: 'Seedream 4.0 · 标准方舟（非 Agent Plan）' },
+        { id: 'doubao-seededit-3-0-i2i-250628', hint: 'SeedEdit 3.0 · 标准方舟（非 Agent Plan）' },
       ],
       qwen: [
         { id: 'qwen-image-edit-plus', hint: '通义万相 · 图像编辑增强版' },

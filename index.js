@@ -752,6 +752,16 @@ async function callArk({ apiKey, baseUrl, model, prompt, images, size, count, si
     // 但各家对 size 的接受范围不一致（Agent Plan 的示例用的是 "2K" 这种档位字符串）。
     // 像素被拒时退回档位写法再试一次 —— 总比直接失败好，用户至少能拿到图。
     const text = String(failure?.message ?? failure)
+    // 型号不在套餐里时，方舟只回一句很含糊的「does not support the agent plan
+    // feature」，用户根本不知道该换哪个 —— 换成可执行的提示。
+    if (/UnsupportedModel|does not support the agent plan/i.test(text)) {
+      throw new Error(
+        `方舟说这个模型不在你的套餐里：${model}。\n` +
+          '型号能不能用取决于**你买的套餐开没开**，和官网有没有这个型号无关 —— ' +
+          'Agent Plan 目前实测可用的是 doubao-seedream-5.0-pro。\n' +
+          '请在面板「方舟模型」里换成可用型号，或到方舟控制台确认套餐支持哪些模型。',
+      )
+    }
     if (!/size|尺寸|分辨率|resolution|宽高|invalid/i.test(text)) throw failure
     json = await postJson(url, headers, buildBody('2K'), signal)
   }
