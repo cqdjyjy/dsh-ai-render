@@ -567,7 +567,7 @@ console.log('\n== 3f. API Key 必须能原样送达（base64 传输） ==')
 // 根因：面板把整个 job 拼进**命令行字符串**，命令行会过命令解析器
 // （引号 / 反斜杠 / 空白 / 转义）—— Key 里含这些字符就被改写了。
 // 现在面板改传 base64url，宿主两种都认。
-const { parseJobInput } = await import(`file://${path.join(root, 'index.js').replaceAll('\\', '/')}`)
+const { parseJobInput, fitSize } = await import(`file://${path.join(root, 'index.js').replaceAll('\\', '/')}`)
 const b64 = (obj) => Buffer.from(JSON.stringify(obj), 'utf8').toString('base64url')
 const arkKey = 'AKLTZmY2NDk4-NzA0OS00MjM0LWI5ZjctY2Q0YzE'
 check(parseJobInput(b64({ action: 'configure', arkApiKey: arkKey })).arkApiKey === arkKey, 'base64 传输：火山方舟 Key 原样还原')
@@ -588,6 +588,28 @@ check(changed.ark?.model === 'doubao-seedream-3-0-t2i-250415', '保存后状态�
 const reread = await call({ action: 'status' })
 check(reread.ark?.model === 'doubao-seedream-3-0-t2i-250415', '重新读状态仍是新型号（真的落盘了）')
 await call({ action: 'configure', arkModel: before.ark.model })
+
+console.log('\n== 3h. 分辨率档位：只改像素上限，比例必须跟随底图 ==')
+// 用户要求「可以选择分辨率」并追加 1.5K。
+// 设计要点：**不能**把 "2K" 档位字符串直接发给接口 —— 那样画布比例由接口决定，
+// 底图 0.62 的竖图会被塞进 0.67 的画布，模型为了填满而拉伸/重排，结构又被改。
+// 所以档位只决定最长边，比例仍由底图决定。
+const SIDES = { '1K': 1024, '1.5K': 1536, '2K': 2048, '4K': 4096 }
+const baseAr = 272 / 437
+for (const [tier, side] of Object.entries(SIDES)) {
+  const s = fitSize(272, 437, side)
+  const longest = Math.max(s.width, s.height)
+  check(
+    Math.abs(longest - side) <= 32,
+    `${tier}：最长边 ≈ ${side}（实际 ${s.width}x${s.height}）`,
+  )
+  check(
+    Math.abs(s.width / s.height - baseAr) < 0.02,
+    `${tier}：比例仍跟随底图（${(s.width / s.height).toFixed(3)} vs ${baseAr.toFixed(3)}）`,
+  )
+}
+// 4K 不能被 2048 的上限压回去（踩过：上限卡在 2048 时 4K 选了也没用）
+check(Math.max(fitSize(272, 437, 4096).width, fitSize(272, 437, 4096).height) > 3000, '4K 不再被 2048 上限压回')
 
 console.log('\n== 4. 无底图时的图号偏移 ==')
 seen.length = 0

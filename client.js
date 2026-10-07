@@ -2719,6 +2719,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               ...[
                 { id: 'follow', label: '自动', side: 0 },
                 { id: '1K', label: '1K', side: 1024 },
+                { id: '1.5K', label: '1.5K', side: 1536 },
                 { id: '2K', label: '2K', side: 2048 },
                 { id: '4K', label: '4K', side: 4096 },
               ].map((item) =>

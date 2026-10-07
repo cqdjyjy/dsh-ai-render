@@ -46,7 +46,7 @@ import {
 } from './presets.js'
 
 export const name = 'ai-render'
-export { parseJobInput, agyPrompt, harvestAgyImages, agyHomeDir, agyIndex, walkDir }
+export { parseJobInput, fitSize, agyPrompt, harvestAgyImages, agyHomeDir, agyIndex, walkDir }
 /**
  * 依赖声明。
  *
@@ -54,13 +54,11 @@ export { parseJobInput, agyPrompt, harvestAgyImages, agyHomeDir, agyIndex, walkD
  * undefined，AI 润色会静默退回内置模板，用户看到的就是「AI 润色没走模型」。
  * 踩过的坑：这两个服务在宿主里明明存在，但没注入就用不到。
  *
- * 用 optional 而不是 required：老版本 DSH 没有这两个服务时，插件仍要能加载
- * （润色降级为「原话直接附在框架后」，出图不受影响）。
+ * 只能用数组形式。曾经试过 Cordis 的 `{ required: [...], optional: [...] }` 写法，
+ * 结果插件直接 pending —— 宿主把对象的**键**当成了服务名，
+ * 报 "waiting for services: required, optional"。数组是确定可用的形式。
  */
-export const inject = {
-  required: ['commands', 'attachments', 'sessions'],
-  optional: ['llm', 'agentDefaultModel'],
-}
+export const inject = ['commands', 'attachments', 'sessions', 'llm', 'agentDefaultModel']
 
 /** cordis.patch.yml 。config 的默认值；设置文件可覆盖其中若干项。*/
 const DEFAULTS = {
@@ -198,7 +196,9 @@ function fitSize(srcWidth, srcHeight, maxSide) {
   const ar = srcWidth > 0 && srcHeight > 0 ? srcWidth / srcHeight : 4 / 3
   let width = ar >= 1 ? cap : Math.round(cap * ar)
   let height = ar >= 1 ? Math.round(cap / ar) : cap
-  const snap = (v) => Math.max(512, Math.min(2048, Math.round(v / 16) * 16))
+  // 每边的钳制也必须放到 4096：上轮只改了外面的 cap，4K 时
+    // 2548x4096 会被这里压成 2048x2048 —— 比例直接毁掉（测试抓到的）。
+    const snap = (v) => Math.max(512, Math.min(4096, Math.round(v / 16) * 16))
   width = snap(width)
   height = snap(height)
   return { width, height }
@@ -1634,7 +1634,7 @@ if (mode.id === 'style-transfer' && references.length === 0) {
   // 为什么不直接把 "2K" 档位字符串发给接口：那样画布比例就由接口决定，
   // 底图 0.62 的竖图会被塞进 0.67 的画布 —— 模型为了填满而拉伸/重排，
   // 结构又会被改。所以「分辨率」只决定**像素上限**，比例始终跟随底图。
-  const RESOLUTION_SIDES = { '1K': 1024, '2K': 2048, '4K': 4096 }
+  const RESOLUTION_SIDES = { '1K': 1024, '1.5K': 1536, '2K': 2048, '4K': 4096 }
   const resolutionSide = RESOLUTION_SIDES[String(job.resolution ?? '').toUpperCase()] || 0
   const size = explicit
     ? { width: Number(explicit.split('x')[0]), height: Number(explicit.split('x')[1]) }
