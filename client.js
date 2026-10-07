@@ -38,6 +38,7 @@ window.__ModuleLoader__.load({
      */
     const MODEL_PRESETS = {
       ark: [
+        { id: 'doubao-seedream-5-0-pro', hint: 'Seedream 5.0 pro · 最新' },
         { id: 'doubao-seedream-4-0-250828', hint: 'Seedream 4.0 · 文生图 / 图生图' },
         { id: 'doubao-seedream-3-0-t2i-250415', hint: 'Seedream 3.0 · 文生图' },
         { id: 'doubao-seededit-3-0-i2i-250628', hint: 'SeedEdit 3.0 · 图生图（按底图改）' },
@@ -2124,13 +2125,17 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               return h(
                 'div',
                 { className: 'cr-slider-sources', key: `model-${id}`, style: { marginTop: '4px' } },
-                h('span', { className: 'cr-note' }, id === 'ark' ? '方舟模型' : '百炼模型'),
+                h(
+                  'span',
+                  { className: 'cr-note', title: '方舟型号上新很快，这里只是常用项；控制台里的任意 model id 都能直接粘进来' },
+                  id === 'ark' ? '方舟模型' : '百炼模型',
+                ),
                 h('input', {
                   className: 'cr-ta',
                   style: { minHeight: 'auto', padding: '7px 9px', flex: '1 1 200px' },
                   type: 'text',
                   autoComplete: 'off',
-                  placeholder: '模型 id（留空 = 用默认）',
+                  placeholder: '模型 / 接入点 id（留空 = 用默认；官网有新版本可直接粘进来）',
                   value,
                   onChange: (event) => setValue(event.target.value),
                 }),
