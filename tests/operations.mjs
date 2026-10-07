@@ -577,6 +577,18 @@ check(parseJobInput(b64({ dashscopeApiKey: nasty })).dashscopeApiKey === nasty, 
 check(parseJobInput('这不是base64也不是json') === null, '非法输入返回 null（上层给出可读报错）')
 check(parseJobInput('').action === undefined && typeof parseJobInput('') === 'object', '空输入返回空对象')
 
+console.log('\n== 3g. 模型型号必须能改（面板要给出入口） ==')
+// 用户问「为啥没有模型选择」：型号本来就可配（SETTABLE 里有 arkModel），
+// 但面板没有输入框 —— 只能改配置文件。这里锁住「存得进、读得出、发得对」。
+const before = await call({ action: 'status' })
+check(typeof before.ark?.model === 'string' && before.ark.model.length > 0, `默认就有方舟型号（${before.ark?.model}）`)
+const changed = await call({ action: 'configure', arkModel: 'doubao-seedream-3-0-t2i-250415' })
+check(changed.saved === true, '保存方舟型号成功')
+check(changed.ark?.model === 'doubao-seedream-3-0-t2i-250415', '保存后状态里就是新型号')
+const reread = await call({ action: 'status' })
+check(reread.ark?.model === 'doubao-seedream-3-0-t2i-250415', '重新读状态仍是新型号（真的落盘了）')
+await call({ action: 'configure', arkModel: before.ark.model })
+
 console.log('\n== 4. 无底图时的图号偏移 ==')
 seen.length = 0
 await call(

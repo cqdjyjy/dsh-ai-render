@@ -30,6 +30,24 @@ window.__ModuleLoader__.load({
       { id: 'openai', label: 'OpenAI 中转', hint: '第三方中转站' },
     ]
 
+    /**
+     * 常用出图型号（可以手填别的）。
+     *
+     * 为什么不写死一个：方舟/百炼的型号 id 换得很勤（带日期后缀），
+     * 写死迟早过期；但完全空着用户又不知道该填什么，所以给常用项 + 自由输入。
+     */
+    const MODEL_PRESETS = {
+      ark: [
+        { id: 'doubao-seedream-4-0-250828', hint: 'Seedream 4.0 · 文生图 / 图生图' },
+        { id: 'doubao-seedream-3-0-t2i-250415', hint: 'Seedream 3.0 · 文生图' },
+        { id: 'doubao-seededit-3-0-i2i-250628', hint: 'SeedEdit 3.0 · 图生图（按底图改）' },
+      ],
+      qwen: [
+        { id: 'qwen-image-edit-plus', hint: '通义万相 · 图像编辑增强版' },
+        { id: 'qwen-image-edit', hint: '通义万相 · 图像编辑' },
+      ],
+    }
+
     const OPENAI_MODES = [
       { id: 'auto', label: '智能', hint: '按模型名自动选：优先异步任务接口，失败再逐个试同步形态' },
       { id: 'async', label: '异步任务', hint: '/v1/images/edits/async + 轮询 /v1/images/tasks/{id}，AILink 类站的主力形态，参考图字段是 source_images' },
@@ -1386,6 +1404,9 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       const [settingsOpen, setSettingsOpen] = React.useState(false)
       const [arkKey, setArkKey] = React.useState('')
       const [qwenKey, setQwenKey] = React.useState('')
+      // 各家模型的型号可以选（方舟/百炼的型号换得很勤，写死一个迟早过期）。
+      const [arkModelInput, setArkModelInput] = React.useState('')
+      const [qwenModelInput, setQwenModelInput] = React.useState('')
       const [saving, setSaving] = React.useState(false)
       const [relayUrl, setRelayUrl] = React.useState('')
       // input_fidelity：'high' = 声明尽量保留输入图结构；'off' = 不发送该字段
@@ -1841,6 +1862,9 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
           .then((info) => {
             if (!alive) return
             setStatus(info)
+            // 把当前生效的型号回填到输入框（用户可能想换个型号）
+            setArkModelInput(info.ark?.model ?? '')
+            setQwenModelInput(info.qwen?.model ?? '')
             setRelayUrl(info.openai?.baseUrl ?? '')
             setRelayModel(info.openai?.model ?? '')
             setRelayMode(info.openai?.mode ?? 'auto')
@@ -2092,6 +2116,40 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               value: qwenKey,
               onChange: (event) => setQwenKey(event.target.value),
             }),
+            // 模型：可手填，也可点常用型号
+            ['ark', 'qwen'].map((id) => {
+              const value = id === 'ark' ? arkModelInput : qwenModelInput
+              const setValue = id === 'ark' ? setArkModelInput : setQwenModelInput
+              const current = id === 'ark' ? status?.ark?.model : status?.qwen?.model
+              return h(
+                'div',
+                { className: 'cr-slider-sources', key: `model-${id}`, style: { marginTop: '4px' } },
+                h('span', { className: 'cr-note' }, id === 'ark' ? '方舟模型' : '百炼模型'),
+                h('input', {
+                  className: 'cr-ta',
+                  style: { minHeight: 'auto', padding: '7px 9px', flex: '1 1 200px' },
+                  type: 'text',
+                  autoComplete: 'off',
+                  placeholder: '模型 id（留空 = 用默认）',
+                  value,
+                  onChange: (event) => setValue(event.target.value),
+                }),
+                ...(MODEL_PRESETS[id] ?? []).map((item) =>
+                  h(
+                    'button',
+                    {
+                      key: item.id,
+                      className: 'cr-chip',
+                      type: 'button',
+                      title: item.hint,
+                      'data-active': (value || current) === item.id ? '1' : '0',
+                      onClick: () => setValue(item.id),
+                    },
+                    (item.hint.split('·')[0] ?? item.id).trim(),
+                  ),
+                ),
+              )
+            }),
 
             // 第三方中转站（OpenAI 兼容）
             h('div', { className: 'cr-label', style: { marginTop: '6px' } }, 'OpenAI 兼容中转站'),
@@ -2196,6 +2254,8 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
                     if (relayKey.trim()) patch.openaiApiKey = relayKey.trim()
                     if (relayUrl.trim()) patch.openaiBaseUrl = relayUrl.trim()
                     if (relayModel.trim()) patch.openaiModel = relayModel.trim()
+                    if (arkModelInput.trim()) patch.arkModel = arkModelInput.trim()
+                    if (qwenModelInput.trim()) patch.dashscopeModel = qwenModelInput.trim()
                     patch.openaiMode = relayMode
                     await saveKeys(patch)
                     setArkKey('')
