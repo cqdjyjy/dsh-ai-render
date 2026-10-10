@@ -585,6 +585,7 @@ console.log('\n== 9. 一键下载安装引擎（本地 HTTP，不碰外网）=='
 }
 
 // ---------------------------------------------------------------- 收尾
+await fsp.rm(fakeHome, { recursive: true, force: true })
 await fsp.rm(fakeHomeInstall, { recursive: true, force: true })
 await fsp.rm(engineDir, { recursive: true, force: true })
 await fsp.rm(argsLog, { force: true })

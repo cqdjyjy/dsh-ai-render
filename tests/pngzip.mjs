@@ -1,5 +1,5 @@
 /**
- * pngzip.js 的离线测试：不需要网络、不需要 Key，只读 tests/fixtures 与 tools/ 下的真实文件。
+ * pngzip.js 的离线测试：不需要网络、不需要 Key。
  *
  * 覆盖：
  *   1. 全黑 PNG（真实产物 fixture）→ min/max 都是 0
@@ -7,10 +7,15 @@
  *   3. 渐变 PNG → min/mean/max 落在应有区间，且 R 通道随列单调
  *   4. RGBA 与调色板（colorType 3）→ 宽高、通道数、已知颜色都读对
  *   5. 截断 / 垃圾数据 → 返回 null 且不抛错
- *   6. 真实 Real-ESRGAN 压缩包 → 条目名、大小、exe 的 MZ 头
+ *   6. 真实 Real-ESRGAN 压缩包（**可选**，见下）→ 条目名、大小、exe 的 MZ 头
  *   7. 随机字节当 ZIP → null 且不抛错
  *   8. 自己写的极小 ZIP 写入器 → 往返一致，且 unzipToDir 落盘字节正确
- *   9. unzipToDir 解真实压缩包 → exe 落盘且 > 5MB（用完删掉临时目录）
+ *   8.5 自造的「够真」引擎包（多文件 / deflate / MB 级 / MZ）→ 等效覆盖，恒定运行
+ *   9. unzipToDir → 落盘字节与尺寸正确，临时目录用完清掉
+ *
+ * **为什么不依赖真实压缩包**：那个 43MB 的 realesrgan 官方包是开发机上的临时
+ * 文件，不在仓库里，fresh clone 根本没有。所以第 6 节改成「有就跑、没有就 skip」，
+ * 真正必须有覆盖的性质（多文件 / deflate / 大文件 / MZ）在第 8.5 节用自造的包跑。
  *
  * 用法：node tests/pngzip.mjs
  */
@@ -119,27 +124,40 @@ check(readPngStats(Buffer.alloc(0)) === null, '空 buffer 返回 null')
 check(readPngStats(null) === null, '非 Buffer 返回 null')
 check(readPngStats(await fsp.readFile(path.join(fixtures, 'user-ref-wood.jpg'))) === null, 'JPEG 返回 null（不是 PNG）')
 
-// ---------------------------------------------------------- 6. 真实压缩包
+// ---------------------------------------------------------- 6. 真实压缩包（可选）
 
 console.log('\n== 6. 真实压缩包 unzipEntries ==')
-const zipBuffer = await fsp.readFile(realZip)
-const entries = unzipEntries(zipBuffer)
-check(Array.isArray(entries), '返回数组而不是 null')
-const byName = new Map((entries ?? []).map((entry) => [entry.name, entry]))
-check(entries !== null && entries.length >= 10, `条目数 >= 10（实际 ${entries?.length}）`)
+// 那个真实的 43MB 包**不在仓库里**（是开发机上的临时文件），所以这里必须容错：
+// 「跑不了」就明确 skip，而不是崩掉或假装通过。
+// 真正必须有覆盖的「多文件 + deflate + 大文件」部分放在第 8.5 节，用自造的包跑。
+let zipBuffer = null
+try {
+  zipBuffer = await fsp.readFile(realZip)
+} catch {
+  zipBuffer = null
+}
+if (!zipBuffer) {
+  console.log(`  skip 没找到真实压缩包（${realZip}）—— 第 6 / 9 节的真实包断言跳过`)
+  console.log('  skip 自造的等价覆盖见第 8.5 节（多文件 / deflate / MZ / 尺寸）')
+} else {
+  const entries = unzipEntries(zipBuffer)
+  check(Array.isArray(entries), '返回数组而不是 null')
+  const byName = new Map((entries ?? []).map((entry) => [entry.name, entry]))
+  check(entries !== null && entries.length >= 10, `条目数 >= 10（实际 ${entries?.length}）`)
 
-const exe = byName.get('realesrgan-ncnn-vulkan.exe')
-check(Boolean(exe), '含 realesrgan-ncnn-vulkan.exe')
-check((exe?.data.length ?? 0) > 5_000_000, `exe 解出 > 5MB（实际 ${exe?.data.length}）`)
-check(exe?.data.subarray(0, 2).toString('latin1') === 'MZ', 'exe 以 MZ 开头')
+  const exe = byName.get('realesrgan-ncnn-vulkan.exe')
+  check(Boolean(exe), '含 realesrgan-ncnn-vulkan.exe')
+  check((exe?.data.length ?? 0) > 5_000_000, `exe 解出 > 5MB（实际 ${exe?.data.length}）`)
+  check(exe?.data.subarray(0, 2).toString('latin1') === 'MZ', 'exe 以 MZ 开头')
 
-const model = byName.get('models/realesrgan-x4plus.bin')
-check(Boolean(model), '含 models/realesrgan-x4plus.bin')
-check((model?.data.length ?? 0) > 30_000_000, `模型解出 > 30MB（实际 ${model?.data.length}）`)
-check(
-  (entries ?? []).every((entry) => !entry.name.endsWith('/')),
-  '目录条目没有被当成文件返回',
-)
+  const model = byName.get('models/realesrgan-x4plus.bin')
+  check(Boolean(model), '含 models/realesrgan-x4plus.bin')
+  check((model?.data.length ?? 0) > 30_000_000, `模型解出 > 30MB（实际 ${model?.data.length}）`)
+  check(
+    (entries ?? []).every((entry) => !entry.name.endsWith('/')),
+    '目录条目没有被当成文件返回',
+  )
+}
 
 // ---------------------------------------------------------- 7. 随机字节
 
@@ -156,7 +174,11 @@ try {
 check(!zipThrew, '随机字节不抛错')
 check(noiseEntries === null, '随机字节返回 null')
 check(unzipEntries(Buffer.alloc(0)) === null, '空 buffer 返回 null')
-check(unzipEntries(zipBuffer.subarray(0, 1000)) === null, '砍掉一半的真压缩包返回 null')
+if (zipBuffer) {
+  check(unzipEntries(zipBuffer.subarray(0, 1000)) === null, '砍掉一半的真压缩包返回 null')
+} else {
+  console.log('  skip 没有真实压缩包，跳过「砍一半」这条')
+}
 
 // ---------------------------------------------------------- 8. 自制 ZIP 往返
 
@@ -260,18 +282,41 @@ try {
 check(dirThrew, 'unzipToDir 遇到解不开的数据会抛错')
 await fsp.rm(roundDir, { recursive: true, force: true })
 
-// ---------------------------------------------------------- 9. 真实包落盘
+// ---------------------------------------------------------- 8.5 自造的「够真」压缩包
 
-console.log('\n== 9. unzipToDir 解真实压缩包 ==')
+console.log('\n== 8.5 自造的多文件 deflate 包（等效于真实引擎包）==')
+// 真实引擎包的形状：一个几 MB 的 exe（MZ 开头）+ 一堆模型 + 说明文件，
+// 全部 deflate 压缩。用自造的包覆盖这些性质，测试就不再依赖开发机上的临时文件。
+const fakeExe = Buffer.concat([Buffer.from('MZ', 'latin1'), Buffer.alloc(1_500_000, 0x41)])
+const fakeModel = Buffer.alloc(3_000_000, 0x5a)
+const engineZip = writeZip([
+  { name: 'realesrgan-ncnn-vulkan.exe', data: fakeExe },
+  { name: 'models/realesrgan-x4plus.bin', data: fakeModel },
+  { name: 'models/realesrgan-x4plus.param', data: 'param-content' },
+  { name: 'README_windows.md', data: '# readme' },
+  { name: 'models/' },
+])
+const engineEntries = unzipEntries(engineZip)
+check(Array.isArray(engineEntries), '引擎包能解开')
+check(engineEntries?.length === 4, `目录条目被跳过，剩 4 条（实际 ${engineEntries?.length}）`)
+const engineByName = new Map((engineEntries ?? []).map((entry) => [entry.name, entry]))
+check(engineByName.get('realesrgan-ncnn-vulkan.exe')?.data.equals(fakeExe), 'deflate 的 exe 往返一致')
+check(engineByName.get('realesrgan-ncnn-vulkan.exe')?.data.subarray(0, 2).toString('latin1') === 'MZ', 'exe 以 MZ 开头')
+check((engineByName.get('models/realesrgan-x4plus.bin')?.data.length ?? 0) === fakeModel.length, '3MB 模型解出尺寸正确')
+check(engineZip.length < fakeExe.length + fakeModel.length, `deflate 真的压缩了（${engineZip.length} < ${fakeExe.length + fakeModel.length}）`)
+
+// ---------------------------------------------------------- 9. 落盘
+
+console.log('\n== 9. unzipToDir 落盘 ==')
 const realDir = path.join(os.tmpdir(), `pngzip-real-${process.pid}`)
 await fsp.rm(realDir, { recursive: true, force: true })
-const realWritten = await unzipToDir(zipBuffer, realDir)
-check(realWritten.length >= 10, `写出文件数 >= 10（实际 ${realWritten.length}）`)
+const realWritten = await unzipToDir(engineZip, realDir)
+check(realWritten.length === 4, `写出文件数 4（实际 ${realWritten.length}）`)
 check(realWritten.every((item) => path.isAbsolute(item)), '返回的都是绝对路径')
 const exePath = path.join(realDir, 'realesrgan-ncnn-vulkan.exe')
 const exeStat = await fsp.stat(exePath).catch(() => null)
 check(Boolean(exeStat), 'exe 真的落盘了')
-check((exeStat?.size ?? 0) > 5_000_000, `落盘 exe > 5MB（实际 ${exeStat?.size}）`)
+check((exeStat?.size ?? 0) === fakeExe.length, `落盘 exe 尺寸正确（实际 ${exeStat?.size}）`)
 const exeHead = Buffer.alloc(2)
 const exeHandle = exeStat ? await fsp.open(exePath, 'r') : null
 if (exeHandle) {
@@ -279,8 +324,22 @@ if (exeHandle) {
   await exeHandle.close()
 }
 check(exeHead.toString('latin1') === 'MZ', '落盘 exe 以 MZ 开头')
+check((await fsp.stat(path.join(realDir, 'models', 'realesrgan-x4plus.bin')).catch(() => null))?.size === fakeModel.length, '子目录里的模型也落盘了')
 await fsp.rm(realDir, { recursive: true, force: true })
 check(!(await fsp.stat(realDir).catch(() => null)), '临时目录已清理')
+
+if (zipBuffer) {
+  console.log('\n== 9.5 真实压缩包落盘（可选）==')
+  const trueDir = path.join(os.tmpdir(), `pngzip-true-${process.pid}`)
+  await fsp.rm(trueDir, { recursive: true, force: true })
+  const written = await unzipToDir(zipBuffer, trueDir)
+  check(written.length >= 10, `写出文件数 >= 10（实际 ${written.length}）`)
+  const trueExe = await fsp.stat(path.join(trueDir, 'realesrgan-ncnn-vulkan.exe')).catch(() => null)
+  check((trueExe?.size ?? 0) > 5_000_000, `真实包落盘 exe > 5MB（实际 ${trueExe?.size}）`)
+  await fsp.rm(trueDir, { recursive: true, force: true })
+} else {
+  console.log('\n  skip 没有真实压缩包，跳过「真实包落盘」')
+}
 
 console.log(failures === 0 ? '\nPNGZIP TEST PASSED' : `\nPNGZIP TEST FAILED (${failures})`)
 process.exit(failures === 0 ? 0 : 1)
