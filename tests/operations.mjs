@@ -168,7 +168,7 @@ const refBlock = await imageBlock(path.join(here, 'fixtures', 'user-ref-wood.jpg
 
 console.log('== 1. 目录暴露 ==')
 const catalog = await call({ action: 'presets' })
-check(catalog.taskModes.length === 11, `操作 11 个（实为 ${catalog.taskModes.length}）`)
+check(catalog.taskModes.length === 12, `操作 12 个（实为 ${catalog.taskModes.length}）`)
 check(catalog.diagrams.length === 5, `分析图类型 5 个（实为 ${catalog.diagrams.length}）`)
 check(catalog.quickActions.length === 8, `一键操作 8 个（实为 ${catalog.quickActions.length}）`)
 check(

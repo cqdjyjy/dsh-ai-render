@@ -47,7 +47,7 @@ const check = (condition, label) => {
 const SECTION_ORDER = ['【结构锁死】', '【视角构图】', '【材质色彩】', '【光影】', '【清除】', '【画质】']
 
 console.log('\n== 1. 目录完整性 ==')
-check(TASK_MODES.length === 11, `操作 11 个（实为 ${TASK_MODES.length}）`)
+check(TASK_MODES.length === 12, `操作 12 个（实为 ${TASK_MODES.length}）`)
 check(STYLE_PRESETS.length === 30, `风格预设 30 个（实为 ${STYLE_PRESETS.length}）`)
 check(LIGHTING_PRESETS.length === 5, `光影预设 5 个（实为 ${LIGHTING_PRESETS.length}）`)
 check(
@@ -636,6 +636,16 @@ check(
   !defaultElevation.includes('素色乳胶漆墙面与浅灰微水泥地面'),
   '立面底图模式下空间环境不硬塞微水泥地面',
 )
+
+console.log('\n== 31. 洗图：只提画质，材质与光影必须沿用图1 ==')
+// 洗图最典型的失败样子是「趁机重新设计」：套用风格模板把原图的材质/光换掉。
+// 所以它在 MODE_INHERITS_STYLE 里，风格模板不得参与材质与光影。
+const washPrompt = composePrompt({ taskMode: 'wash', stylePreset: 'cream', lighting: 'warm' })
+check(washPrompt.includes('完全沿用图1'), '洗图：材质明确沿用图1')
+check(!washPrompt.includes('奶油白'), '洗图：不夹带风格模板的材质')
+check(!/3000K/.test(washPrompt), '洗图：不夹带风格模板的色温')
+check(washPrompt.includes('构图与视角'), '洗图：结构段声明构图视角原样保留')
+check(/噪点|伪影/.test(washPrompt), '洗图：清除段针对放大/压缩痕迹')
 
 console.log(failures === 0 ? '\nPRESETS TEST PASSED' : `\nPRESETS TEST FAILED (${failures})`)
 process.exit(failures === 0 ? 0 : 1)

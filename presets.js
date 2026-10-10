@@ -68,6 +68,27 @@ const TASK_MODES = [
     cleanupShort: '去除辅助线、网格、坐标轴与界面元素。',
   },
   {
+    // 洗图：把「已经定稿的图」再喂回模型做一次高清重绘。
+    //
+    // 真 DLSS 是 GPU 超分，插件跑不了；这里是用图像模型做等价的事 ——
+    // 低改动力度地重画一遍：去噪、去压缩伪影、修复边缘、还原材质细节。
+    // 关键约束：**内容一律不动**。洗图失败最典型的样子就是「趁机重新设计」，
+    // 所以 structure 段写得比别的模式更死。
+    id: 'wash',
+    label: '洗图 / 高清',
+    hint: '把已出的效果图、成品图或网络图再洗一遍：去噪、去伪影、提清晰度与材质细节，构图与内容一律不动',
+    frame: '把图1当成一张**已经定稿的成品图**，你的任务只是提升它的画质与细节，不是重做它。',
+    frameShort: '把图1当成定稿成品图做高清重绘，只提画质不重做。',
+    structure:
+      '图1的一切内容必须**原样保留**：构图与视角、主体轮廓与长宽比例、分格结构、构件与五金的数量位置、材质与颜色、光影方向与明暗关系、背景元素，一律不得增删、移动、置换或重新设计。你只能改变「清晰度与细节表现」，不能改变「画的是什么」。若某处看不清，按合理的物理与材质逻辑补全细节，但不得改变它在原图中的形状、位置与颜色。',
+    structureShort: '图1的构图、结构、材质、光影与配色必须 100% 原样保留，只提升清晰度与细节，不得重新设计。',
+    view: '完全保持图1的机位、透视、焦段与构图不变，不要换角度、不要重新取景、不要裁切。',
+    viewShort: '完全保持图1的机位、透视与构图不变。',
+    cleanup:
+      '清除放大与压缩留下的痕迹：噪点、色带、块状伪影、锯齿、摩尔纹、涂抹感、过度锐化的白边与光晕；同时消除 AI 生成常见的塑料感与糊面，让画面看起来像高分辨率原生渲染，而不是被放大过的图。',
+    cleanupShort: '清除噪点、色带、块状伪影、锯齿、摩尔纹与过度锐化的光晕。',
+  },
+  {
     id: 'photo',
     label: '实拍照片',
     hint: '现场实拍照片 → 材质升级、去杂乱、提升画质',
@@ -697,7 +718,9 @@ const AS_IS_STYLE = {
 }
 
 /** 这些操作画面上有可继承的材质，允许「沿用底图」。 */
-const MODE_INHERITS_STYLE = new Set(['view-switch', 'photo'])
+// wash（洗图）也必须在这里：洗图只提画质，材质/光影/配色一律以图1为准，
+// 一旦让风格模板参与进来，就会把原图的材质换掉 —— 那就不是洗图了。
+const MODE_INHERITS_STYLE = new Set(['view-switch', 'photo', 'wash'])
 
 /**
  * 风格按组划分，组再按操作分配。
@@ -1418,7 +1441,7 @@ function composePrompt(options = {}) {
       })
     }
     // 「沿用底图」不是一个风格，而是「不指定风格」：不能按风格段注入材质。
-    const styleUsable = Boolean(style && (style.group ?? 'interior') !== 'none' && (style.material || style.detail))
+    const styleUsable = Boolean(style && (style.group ?? 'interior') !== 'none' && (style.material || style.detail)) && !modeInheritsStyle(mode.id)
     if (styleUsable) {
       // 参考图若是「一张完整的房间效果图」，模型会直接照抄它的构图。
       // 所以材质段必须显式禁止复制参考图内容 —— 实测这是最常见的跑偏原因。
@@ -1501,9 +1524,15 @@ function composePrompt(options = {}) {
       priority: 50,
       // 防御：任何一个风格预设漏了 light 字段，都必须回落到默认描述。
       // 否则会把字面量 "undefined" 拼进提示词发给模型（踩过一次）。
-      text:
-        (lighting ? lighting.prompt : style ? style.light : '') || '柔和自然的室内灯光，真实阴影与反射。',
-      short: '柔和自然的室内灯光，真实阴影与反射。',
+      //
+      // 沿用底图材质的模式（换视角 / 照片优化 / 洗图）：光影也必须沿用图1 ——
+      // 否则洗图会把原图的光换掉（比如硬塞一套暖光 3000K），那就不是洗图了。
+      text: modeInheritsStyle(mode.id)
+        ? '完全沿用图1的光照方向、光源位置、色温、明暗对比与阴影分布，只让光影更干净细腻，不要改变布光。'
+        : (lighting ? lighting.prompt : style ? style.light : '') || '柔和自然的室内灯光，真实阴影与反射。',
+      short: modeInheritsStyle(mode.id)
+        ? '完全沿用图1的布光、色温与阴影，只让光影更干净。'
+        : '柔和自然的室内灯光，真实阴影与反射。',
     })
     segments.push({ name: '【清除】', priority: 90, text: mode.cleanup, short: mode.cleanupShort })
   }
