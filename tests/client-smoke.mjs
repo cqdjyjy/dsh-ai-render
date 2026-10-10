@@ -481,4 +481,12 @@ assert(clientSource.includes('cr-slider-sources'), '有两种原图时可切换�
 assert(clientSource.includes('cad?.previewUrl'), '底图可作为对比原图')
 assert(clientSource.includes('item.compareFrom'), '上一版可作为对比原图')
 
+console.log('\n== 「洗这张」一键洗图 ==')
+// 洗图的用法就是「拿刚出的图再洗一遍」，让用户下载再上传一遍纯属折腾。
+assert(clientSource.includes('async function pickForWash'), '有 pickForWash')
+assert(clientSource.includes('洗这张'), '结果卡片有「洗这张」按钮')
+assert(/setTaskMode\('wash'\)/.test(clientSource), '点击后自动切到洗图操作')
+assert(/setStructure\(''\)/.test(clientSource), '点洗图会清掉已读出的结构说明（否则串味）')
+assert(/prepareFile\(file, 'cad', false\)/.test(clientSource), '洗图不裁切、不清理，保留整幅画面')
+
 console.log(process.exitCode ? '\nSMOKE TEST FAILED' : '\nSMOKE TEST PASSED')

@@ -1738,6 +1738,37 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       }
 
       /**
+       * 「洗这张」：把某张已出的结果设成底图，并自动切到「洗图 / 高清」。
+       *
+       * 为什么要一键：洗图的用法就是「拿刚出的图再洗一遍」，让用户自己下载、
+       * 再重新上传一遍纯属折腾。这里直接用结果卡片上已有的 blob URL 造一个 File，
+       * 复用上传同一条 prepareFile 通道（不裁切、不清理，洗图要保留整幅画面）。
+       */
+      async function pickForWash(item) {
+        if (!item?.url) {
+          setError('这张结果没有可用的图片预览，没法洗图（可能读取失败）。')
+          return
+        }
+        try {
+          const blob = await (await fetch(item.url)).blob()
+          const file = new File([blob], item.name || 'wash.png', { type: blob.type || 'image/png' })
+          const prepared = await prepareFile(file, 'cad', false)
+          setCad(prepared)
+          // 洗图不看图纸结构，前面读出来的结构说明必须清掉，否则会串味
+          setStructure('')
+          setStructureNote('')
+          setTaskMode('wash')
+          setError('')
+          setNote(
+            `已把「${item.name ?? '这张图'}」设为洗图底图，操作已切到「洗图 / 高清」。` +
+              '分辨率可以选 2K / 4K，然后点生成。',
+          )
+        } catch (failure) {
+          setError(`设为洗图底图失败：${String(failure?.message ?? failure)}`)
+        }
+      }
+
+      /**
        * 读历史记录。历史 JSON 只存参数与文件路径，缩略图按需从磁盘读回来，
        * 避免把历史文件撑大，也避免一次性占住几十兆内存。
        */
@@ -3107,6 +3138,18 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
                       disabled: busy,
                       onClick: () => pickForRefine(item.path),
                     }, '改这张'),
+                  item.url &&
+                    h(
+                      'button',
+                      {
+                        className: 'cr-btn',
+                        type: 'button',
+                        disabled: busy,
+                        title: '把这张图设成底图并切到「洗图 / 高清」，只提画质、不重做内容',
+                        onClick: () => pickForWash(item),
+                      },
+                      '洗这张',
+                    ),
                   item.url &&
                     h('button', {
                       className: 'cr-btn',

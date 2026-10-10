@@ -646,6 +646,11 @@ check(!washPrompt.includes('奶油白'), '洗图：不夹带风格模板的材�
 check(!/3000K/.test(washPrompt), '洗图：不夹带风格模板的色温')
 check(washPrompt.includes('构图与视角'), '洗图：结构段声明构图视角原样保留')
 check(/噪点|伪影/.test(washPrompt), '洗图：清除段针对放大/压缩痕迹')
+check(washPrompt.includes('不要重新打光'), '洗图：光影段明确禁止重新打光')
+check(washPrompt.includes('光影复述'), '洗图：末尾重述一次光影（近因效应）')
+check(/光源的方向与数量/.test(washPrompt), '洗图：光影逐项列明（光源方向/数量）')
+check(/高光的位置与强度/.test(washPrompt), '洗图：光影逐项列明（高光位置/强度）')
+check(!composePrompt({ taskMode: 'elevation', stylePreset: 'cream' }).includes('光影复述'), '立面无底图顾虑的模式不加光影复述段')
 
 console.log(failures === 0 ? '\nPRESETS TEST PASSED' : `\nPRESETS TEST FAILED (${failures})`)
 process.exit(failures === 0 ? 0 : 1)
