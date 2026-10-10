@@ -23,6 +23,13 @@ history/
 temp/
 *.tmp
 
+# 测试期间现场造出来的假引擎与假 DSH_HOME（superres 测试会自己清理，这里再兜一层）
+tests/.fake-engine/
+tests/.fake-engine-args.log
+tests/.fake-home-*/
+tests/.fake-home-ops/
+tests/.fake-home-hist/
+
 # ---- 编辑器 ----
 .vscode/
 .idea/

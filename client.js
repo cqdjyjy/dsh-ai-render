@@ -1341,6 +1341,26 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       // 分辨率档位。只决定像素上限，画布比例始终跟随底图（否则结构会被改）。
       const [resolution, setResolution] = React.useState('follow')
       const [autoQc, setAutoQc] = React.useState(true)
+      /**
+       * 本地 GPU 超分（Real-ESRGAN ncnn Vulkan）的状态。
+       *
+       * 这条通道跟云通道不是一回事：不联网、不要 Key，但**要求本机有一块
+       * 能跑 Vulkan 的显卡**。所以面板必须先把「引擎装没装、认不认得到 GPU」
+       * 摊在用户面前，而不是让他点了生成才失败。
+       */
+      const [washBackend, setWashBackend] = React.useState('cloud')
+      const [esrgan, setEsrgan] = React.useState({
+        model: 'realesrgan-x4plus',
+        scale: '4',
+        // 默认 64 而不是 128：实测 4GB 的老卡（Quadro K4200）在 128 上稳定出全黑，
+        // 在 64 上正常。保守默认比「先失败一次再自动降档」体验好得多。
+        tile: '64',
+        gpu: '',
+        tta: false,
+      })
+      const [engine, setEngine] = React.useState(null)
+      const [engineNote, setEngineNote] = React.useState('')
+      const [engineBusy, setEngineBusy] = React.useState(false)
       const [stages, setStages] = React.useState([])
       const [busy, setBusy] = React.useState(false)
       const [error, setError] = React.useState('')
@@ -1461,12 +1481,19 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         (catalog?.cameraDistances ?? []).find((item) => item.id === cameraDistance)?.label ?? ''
       // 每个操作该显示哪些控件，由宿主下发（彩平图不该有光影/构图选择器）。
       const modeUi = operations.find((item) => item.id === taskMode)?.ui ?? {}
-      const showLighting = modeUi.lighting !== false
-      const showCamera = modeUi.camera !== false
-      const showRead = modeUi.read !== false
-      const showQc = modeUi.qc !== false
+      // 「本地超分」这个操作本身就是本地的；「洗图」则是用户自己选后端。
+      // 两种情况下面板都要换成「引擎状态 + 倍数 + 模型 + tile」这一套控件。
+      const activeOperation = operations.find((item) => item.id === taskMode)
+      const isLocalOperation = activeOperation?.local === true
+      const localMode = isLocalOperation || (taskMode === 'wash' && washBackend === 'local')
+      // 本地超分不改画面内容：风格 / 光影 / 构图 / 读图 / 质检一律不显示，
+      // 摆了只会让用户以为「超分还能选风格」。
+      const showLighting = !localMode && modeUi.lighting !== false
+      const showCamera = !localMode && modeUi.camera !== false
+      const showRead = !localMode && modeUi.read !== false
+      const showQc = !localMode && modeUi.qc !== false
       // 「换视角 / 风格迁移」不选风格：材质要么沿用底图，要么完全来自参考图。
-      const styleFixed = operations.find((item) => item.id === taskMode)?.styleFixed === true
+      const styleFixed = activeOperation?.styleFixed === true
       const STYLE_FIXED_NOTE = {
         'view-switch': '换视角不需要选风格——新角度的材质、颜色与家具会自动沿用底图，保证是同一个空间。',
         'style-transfer': '风格迁移的风格来自你的参考图，不需要再选风格预设。请务必上传 1 张参考图。',
@@ -1535,12 +1562,20 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         }
         // 参考图是可选的：选了风格预设（非「跟随参考图」）就能出图。
         const chosenStyle = styleIds[0] ?? ''
-        if (!refining && needBase && refs.length === 0 && (!chosenStyle || chosenStyle === 'custom')) {
+        // 本地超分不需要风格、也不需要参考图：它不改画面内容，只把分辨率提上去。
+        if (!localMode && !refining && needBase && refs.length === 0 && (!chosenStyle || chosenStyle === 'custom')) {
           setError('当前是「跟随参考图」或没选风格，请再上传 1 张参考图，或改选一个风格预设。')
           return
         }
         // 多选风格 = 多方案：逐个出图（异步接口一个任务只出一张）。
-        const stylesToRun = refining ? [styleIds[0] ?? 'modern'] : styleIds.length > 0 ? styleIds : ['custom']
+        // 本地超分没有「多方案」这回事（输入输出一一对应），固定跑一次。
+        const stylesToRun = localMode
+          ? ['as-is']
+          : refining
+            ? [styleIds[0] ?? 'modern']
+            : styleIds.length > 0
+              ? styleIds
+              : ['custom']
         setError('')
         setResults((previous) => {
           previous.forEach((item) => item.url && URL.revokeObjectURL(item.url))
@@ -1559,13 +1594,17 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
           const collected = []
           const notes = []
           for (const [index, styleId] of stylesToRun.entries()) {
-            const styleLabel = catalog?.styles?.find((item) => item.id === styleId)?.label ?? styleId
+            const styleLabel = localMode
+              ? '本地超分'
+              : catalog?.styles?.find((item) => item.id === styleId)?.label ?? styleId
             setNote(
-              stylesToRun.length > 1
-                ? `正在出第 ${index + 1}/${stylesToRun.length} 张（${styleLabel}），通常 40~90 秒…`
-                : refining
-                  ? '正在按你的意见改这张图，通常 40~90 秒…'
-                  : '正在出图，通常 40~90 秒…',
+              localMode
+                ? `正在用本机 GPU 超分（${esrgan.model} × ${esrgan.scale}）…显卡跑超分可能几十秒到几分钟，请稍等。`
+                : stylesToRun.length > 1
+                  ? `正在出第 ${index + 1}/${stylesToRun.length} 张（${styleLabel}），通常 40~90 秒…`
+                  : refining
+                    ? '正在按你的意见改这张图，通常 40~90 秒…'
+                    : '正在出图，通常 40~90 秒…',
             )
             const job = {
               provider,
@@ -1584,38 +1623,71 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               structure,
               autoQc,
             }
+            // 本地超分：把后端与引擎参数一起下发。宿主看到这些就绕开所有云通道。
+            if (localMode) {
+              job.washBackend = 'local'
+              job.esrganModel = esrgan.model
+              job.esrganScale = esrgan.scale
+              job.esrganTile = esrgan.tile
+              job.esrganGpu = esrgan.gpu
+              job.esrganTta = esrgan.tta ? '1' : '0'
+              // 本地超分没有提示词，也没有质检；把云通道那套字段清掉，
+              // 免得宿主把它们当成一次云出图（那就会去要 API Key）。
+              delete job.plain
+              delete job.promptOverride
+              delete job.structure
+              delete job.diagram
+              delete job.autoQc
+            }
             if (refining) {
               job.instruction = activeInstruction
               job.refineFrom = activeRefineFrom
             }
             setStages(
-              autoQc && !refining
+              localMode
                 ? [
-                    { label: '生成效果图', state: 'active' },
-                    { label: '视觉质检', state: 'idle' },
-                    { label: '必要时自动重出', state: 'idle' },
+                    { label: `本地 GPU 超分 × ${esrgan.scale}`, state: 'active' },
+                    { label: '校验输出（防止拿到废图）', state: 'idle' },
                   ]
-                : [{ label: refining ? '按修改意见重绘' : '生成效果图', state: 'active' }],
+                : autoQc && !refining
+                  ? [
+                      { label: '生成效果图', state: 'active' },
+                      { label: '视觉质检', state: 'idle' },
+                      { label: '必要时自动重出', state: 'idle' },
+                    ]
+                  : [{ label: refining ? '按修改意见重绘' : '生成效果图', state: 'active' }],
             )
             const payload = await callCommand(ctx, sessionId, job, attachments)
             if (runTokenRef.current !== token) return
-            setStages([
-              { label: '生成效果图', state: 'done' },
-              ...(payload.qc
+            setStages(
+              localMode
                 ? [
+                    { label: `本地 GPU 超分 × ${esrgan.scale}`, state: 'done' },
                     {
-                      label:
-                        payload.qc.verdict === 'ok'
-                          ? '视觉质检：结构通过'
-                          : payload.qc.verdict === 'need-fix'
-                            ? '视觉质检：发现结构差异'
-                            : `视觉质检：${payload.qc.verdict ?? '未执行'}`,
+                      label: payload.local?.tile !== undefined && payload.local.tile !== Number(esrgan.tile)
+                        ? `已自动降 tile 重试（${esrgan.tile} → ${payload.local.tile}）后成功`
+                        : '输出已校验（尺寸与像素都正常）',
                       state: 'done',
                     },
                   ]
-                : []),
-              ...(payload.autoFixed ? [{ label: '已按质检意见自动重出', state: 'done' }] : []),
-            ])
+                : [
+                    { label: '生成效果图', state: 'done' },
+                    ...(payload.qc
+                      ? [
+                          {
+                            label:
+                              payload.qc.verdict === 'ok'
+                                ? '视觉质检：结构通过'
+                                : payload.qc.verdict === 'need-fix'
+                                  ? '视觉质检：发现结构差异'
+                                  : `视觉质检：${payload.qc.verdict ?? '未执行'}`,
+                            state: 'done',
+                          },
+                        ]
+                      : []),
+                    ...(payload.autoFixed ? [{ label: '已按质检意见自动重出', state: 'done' }] : []),
+                  ],
+            )
             /** 质检结论映射成结果卡上的小徽标；无结论就不显示。 */
             const qcBadgeOf = (payload) => {
               const verdict = payload?.qc?.verdict
@@ -1650,10 +1722,28 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
             const modeLabel = payload.modeUsed
               ? ` · ${OPENAI_MODES.find((item) => item.id === payload.modeUsed)?.label ?? payload.modeUsed}`
               : ''
-            notes.push(
-              `${styleLabel}: ${payload.providerLabel ?? payload.provider} · ${payload.model}${modeLabel} · ` +
-                `${payload.size} · ${((payload.elapsedMs ?? 0) / 1000).toFixed(1)}s`,
-            )
+            if (localMode) {
+              const info = payload.local ?? {}
+              notes.push(
+                `本地超分（本机 GPU，未联网未花钱）：${payload.model} × ${info.scale ?? esrgan.scale}` +
+                  ` · ${payload.sourceSize ?? '?'} → ${payload.size}` +
+                  ` · GPU ${info.device ?? '未知'} · tile ${info.tile ?? 'auto'}` +
+                  ` · ${((payload.elapsedMs ?? 0) / 1000).toFixed(1)}s`,
+              )
+              // 自动降 tile、没能做纯色比对这类事必须说出来 —— 悄悄发生就是静默失败。
+              for (const warning of info.warnings ?? []) notes.push(`⚠ ${warning}`)
+              if ((info.attempts ?? []).length > 1) {
+                notes.push(
+                  `⚠ 第一次用 tile ${info.attempts[0].tile || 'auto'} 没成，已自动降到 ${info.tile} 重试成功。` +
+                    '把面板上的 tile 也改成这个值，下次就不用重试了。',
+                )
+              }
+            } else {
+              notes.push(
+                `${styleLabel}: ${payload.providerLabel ?? payload.provider} · ${payload.model}${modeLabel} · ` +
+                  `${payload.size} · ${((payload.elapsedMs ?? 0) / 1000).toFixed(1)}s`,
+              )
+            }
             // 比例被模型归过档时如实说明，别让用户以为设置没生效。
             if (payload.sizeNotice) notes.push(`⚠ ${payload.sizeNotice}`)
             setNote(notes.join('\n'))
@@ -1696,6 +1786,8 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         diagram,
         needBase,
         historyOpen,
+        localMode,
+        esrgan,
       ])
 
       /**
@@ -1804,6 +1896,88 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         [ctx, sessionId],
       )
       loadHistoryRef.current = loadHistory
+
+      /**
+       * 读本地超分引擎的状态。
+       *
+       * probe = true 会**真的运行一次引擎**（不带参数，它只打印用法与 Vulkan
+       * 设备列表）—— 光看文件在不在没用：引擎装上了、显卡却不支持 Vulkan
+       * 的情况太常见了。不带 probe 时只查文件，快得多。
+       */
+      const loadEngine = React.useCallback(
+        async (probe = true) => {
+          if (!ctx || !sessionId) return
+          setEngineBusy(true)
+          setEngineNote(probe ? '正在检测引擎与显卡…' : '')
+          try {
+            const data = await callCommand(ctx, sessionId, { action: 'esrgan-status', probe })
+            setEngine(data)
+            // 把设置里存的值同步到面板（只在第一次加载时做，别覆盖用户正在改的）
+            setEsrgan((previous) => ({
+              ...previous,
+              model: data.model ?? previous.model,
+              scale: String(data.scale ?? previous.scale),
+              tile: String(data.tile ?? previous.tile),
+              gpu: data.gpu ?? previous.gpu,
+              tta: Boolean(data.tta),
+            }))
+            if (data.probe?.runnable === true) {
+              const names = (data.probe.devices ?? []).map((item) => item.name).join('、')
+              setEngineNote(
+                `引擎可用 · ${names ? `识别到显卡：${names}` : '已能正常出图（引擎没报告显卡名）'}` +
+                  (data.probe.hint ? ` ⚠ ${data.probe.hint}` : ''),
+              )
+            } else if (data.installed) {
+              setEngineNote(data.probe?.reason || '引擎已就位，但没能确认能跑。')
+            } else {
+              setEngineNote('还没装引擎。点「下载引擎」自动装，或在下面指定引擎路径。')
+            }
+          } catch (failure) {
+            setEngineNote(String(failure?.message ?? failure))
+          } finally {
+            setEngineBusy(false)
+          }
+        },
+        [ctx, sessionId],
+      )
+
+      /** 切到本地超分时自动检测一次；引擎对象已有就不再重复跑（省得每次渲染都起进程）。 */
+      React.useEffect(() => {
+        if (!localMode || engine || engineBusy) return
+        loadEngine(true)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [localMode, engine, engineBusy, loadEngine])
+
+      /**
+       * 下载并安装引擎。
+       *
+       * 会下 40MB 左右，所以先把「正在下载什么、多大」说清楚 —— 用户最怕的是
+       * 点了个按钮之后什么都不知道。
+       */
+      async function installEngine() {
+        if (!ctx || !sessionId || engineBusy) return
+        setEngineBusy(true)
+        setEngineNote('正在下载引擎（约 40MB，含全部模型）…国内直连 GitHub 慢的话，可以在设置里填镜像地址。')
+        try {
+          const custom =
+            engine?.downloadUrl && engine.downloadUrl !== engine.defaultDownloadUrl ? engine.downloadUrl : ''
+          const data = await callCommand(ctx, sessionId, { action: 'esrgan-install', esrganDownloadUrl: custom })
+          setEngine(data)
+          setEngineNote(
+            data.probe?.runnable === true
+              ? `引擎装好了 · ${
+                  (data.probe.devices ?? []).length
+                    ? `识别到显卡：${data.probe.devices.map((item) => item.name).join('、')}`
+                    : '已能正常出图'
+                }${data.probe.hint ? ` ⚠ ${data.probe.hint}` : ''}`
+              : `引擎已装到 ${data.bin}，但没能确认能跑。${data.probe?.reason ?? ''}`,
+          )
+        } catch (failure) {
+          setEngineNote(String(failure?.message ?? failure))
+        } finally {
+          setEngineBusy(false)
+        }
+      }
 
       /** 把一条历史记录的参数整套还原到面板上，改完就能再来一张。 */
       function restoreParams(record) {
@@ -2092,6 +2266,189 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
           },
           label,
         )
+
+      /**
+       * 本地超分这一整块控件。
+       *
+       * 它必须自己回答三个问题，否则这个功能就变成「点一下才知道行不行」：
+       *   1. 引擎装了没有、装在哪 —— 直接显示路径与来源
+       *   2. **这块显卡到底认不认** —— 引擎装上了但卡不支持是最常见的坑，
+       *      所以检测时要真的运行一次引擎，把 Vulkan 设备列出来
+       *   3. 显存旋钮在哪 —— tile 是唯一能救小显存的参数，必须摆在明面上
+       */
+      function localEngineBlock() {
+        const devices = engine?.probe?.devices ?? []
+        // 「能不能跑」以**探针真的算出一张图**为准，而不是「有没有列出显卡名」：
+        // 引擎有可能不打印设备行却照样算得出来（那时说它不可用就是误报）。
+        const ready = Boolean(engine?.installed) && (engine?.probe?.runnable === true || devices.length > 0)
+        const SOURCE_LABEL = {
+          setting: '设置里指定的路径',
+          managed: '插件自管目录',
+          path: '系统 PATH',
+        }
+        const deviceText = devices.length ? `识别到显卡：${devices.map((item) => item.name).join('、')}` : '引擎没报告显卡名'
+        const statusText = engineBusy
+          ? engineNote || '正在检测引擎与显卡（会真的算一张小图，稍等几秒）…'
+          : engine
+            ? engineNote ||
+              (ready
+                ? `引擎可用 · ${deviceText}`
+                : '引擎状态未知，点「重新检测」再试一次。')
+            : '还没检测过引擎。'
+        return h(
+          'div',
+          { className: 'cr-camgroup' },
+          h(
+            'div',
+            { className: 'cr-camgroup-title' },
+            '本地 GPU 超分',
+            h(
+              'span',
+              null,
+              '用本机显卡做真超分：不联网、不花钱、图不外传。需要一块能跑 Vulkan 的显卡（NVIDIA / AMD / Intel 都行）',
+            ),
+          ),
+          h('div', { className: ready ? 'cr-ok' : 'cr-error' }, statusText),
+          // 探针建议：配置的 tile 跑不通、降一档能跑通时，把这件事直接说出来
+          engine?.probe?.hint && h('div', { className: 'cr-note' }, `⚠ ${engine.probe.hint}`),
+          engine?.bin &&
+            h('div', { className: 'cr-note' }, `引擎：${engine.bin}（${SOURCE_LABEL[engine.source] ?? engine.source}）`),
+          engine?.modelsPresent === false &&
+            h('div', { className: 'cr-note' }, `⚠ ${engine.modelsDir} 里没有模型文件（.bin），引擎跑不起来。`),
+          h(
+            'div',
+            { className: 'cr-row' },
+            !ready &&
+              h(
+                'button',
+                { className: 'cr-btn', type: 'button', disabled: engineBusy, onClick: installEngine },
+                engineBusy ? '处理中…' : '下载引擎（约 40MB，含模型）',
+              ),
+            h(
+              'button',
+              { className: 'cr-btn', type: 'button', disabled: engineBusy, onClick: () => loadEngine(true) },
+              '重新检测',
+            ),
+          ),
+
+          // 放大倍数
+          h(
+            'div',
+            { className: 'cr-label', style: { marginTop: '2px' } },
+            '放大倍数',
+            h('span', null, '2 倍最稳；4 倍最清晰，但对显存和时间的压力也最大'),
+          ),
+          h(
+            'div',
+            { className: 'cr-chips' },
+            ['2', '3', '4'].map((value) =>
+              h(
+                'button',
+                {
+                  key: value,
+                  className: 'cr-chip',
+                  type: 'button',
+                  'data-active': esrgan.scale === value ? '1' : '0',
+                  disabled: busy,
+                  onClick: () => setEsrgan((previous) => ({ ...previous, scale: value })),
+                },
+                `× ${value}`,
+              ),
+            ),
+          ),
+
+          // 模型
+          h(
+            'div',
+            { className: 'cr-label', style: { marginTop: '2px' } },
+            '模型',
+            h('span', null, '跑不动就先换「轻量」—— 它最省显存'),
+          ),
+          h(
+            'div',
+            { className: 'cr-chips' },
+            (engine?.models ?? [
+              { id: 'realesrgan-x4plus', label: '写实（推荐）', hint: '' },
+              { id: 'realesrgan-x4plus-anime', label: '动漫 / 插画', hint: '' },
+              { id: 'realesr-animevideov3', label: '轻量（最省显存）', hint: '' },
+            ]).map((item) =>
+              h(
+                'button',
+                {
+                  key: item.id,
+                  className: 'cr-chip',
+                  type: 'button',
+                  'data-active': esrgan.model === item.id ? '1' : '0',
+                  title: item.hint,
+                  disabled: busy,
+                  onClick: () => setEsrgan((previous) => ({ ...previous, model: item.id })),
+                },
+                item.label,
+              ),
+            ),
+          ),
+
+          // tile = 显存占用的唯一旋钮
+          h(
+            'div',
+            { className: 'cr-label', style: { marginTop: '2px' } },
+            '显存 tile',
+            h(
+              'span',
+              null,
+              '越小越不容易爆显存，但越慢、越容易出现分块接缝。跑失败时插件会自动降一档重试',
+            ),
+          ),
+          h(
+            'div',
+            { className: 'cr-chips' },
+            [
+              { id: '32', label: '32 · 最保险' },
+              { id: '64', label: '64 · 默认' },
+              { id: '128', label: '128 · 快，吃显存' },
+              { id: '192', label: '192 · 6GB+' },
+              { id: '256', label: '256 · 8GB+' },
+              { id: '0', label: '自动' },
+            ].map((item) =>
+              h(
+                'button',
+                {
+                  key: item.id,
+                  className: 'cr-chip',
+                  type: 'button',
+                  'data-active': esrgan.tile === item.id ? '1' : '0',
+                  disabled: busy,
+                  onClick: () => setEsrgan((previous) => ({ ...previous, tile: item.id })),
+                },
+                item.label,
+              ),
+            ),
+          ),
+
+          // TTA：更慢更清晰
+          h(
+            'div',
+            { className: 'cr-row' },
+            h(
+              'button',
+              {
+                className: 'cr-chip',
+                type: 'button',
+                'data-active': esrgan.tta ? '1' : '0',
+                title: 'TTA 会把每个 tile 算 8 遍再平均：细节更干净，但慢 8 倍左右',
+                disabled: busy,
+                onClick: () => setEsrgan((previous) => ({ ...previous, tta: !previous.tta })),
+              },
+              esrgan.tta ? '✓ TTA 增强（慢，更干净）' : 'TTA 增强（慢，更干净）',
+            ),
+          ),
+          h(
+            'div',
+            { className: 'cr-note' },
+            '本地超分只提「分辨率与锐度」，不会重画内容 —— 想补细节、去伪影、换材质，请把洗图方式切回「云 AI 重绘」。',
+          ),
+        )
+      }
 
       return h(
         'div',
@@ -2617,6 +2974,55 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               ),
             ),
           ),
+
+          // 「洗图」的后端切换。
+          //
+          // 这两条路的代价完全不同：云 AI 要 Key、按张计费、能补细节；
+          // 本地 GPU 不要 Key、不花钱、图不出本机，但只提分辨率不重画。
+          // 不说清差别，用户会以为「洗图」只有一个意思。
+          taskMode === 'wash' &&
+            h(
+              'div',
+              { className: 'cr-camgroup' },
+              h(
+                'div',
+                { className: 'cr-camgroup-title' },
+                '洗图方式',
+                h('span', null, '云 AI 是「重画」（能补细节、要 Key）；本地 GPU 是「真超分」（免费、不联网，只放大）'),
+              ),
+              h(
+                'div',
+                { className: 'cr-chips' },
+                [
+                  {
+                    id: 'cloud',
+                    label: '云 AI 重绘',
+                    hint: '调图像模型重画一遍：能补细节、去伪影、修边缘，需要 API Key，按张计费',
+                  },
+                  {
+                    id: 'local',
+                    label: '本地 GPU 超分',
+                    hint: '用本机显卡做真超分：不联网、不花钱、图不外传，但只提分辨率与锐度，不会重画内容',
+                  },
+                ].map((item) =>
+                  h(
+                    'button',
+                    {
+                      key: item.id,
+                      className: 'cr-chip',
+                      type: 'button',
+                      'data-active': washBackend === item.id ? '1' : '0',
+                      title: item.hint,
+                      disabled: busy,
+                      onClick: () => setWashBackend(item.id),
+                    },
+                    item.label,
+                  ),
+                ),
+              ),
+            ),
+          // 本地超分自己的那一套控件（引擎状态 / 倍数 / 模型 / tile）
+          localMode && localEngineBlock(),
           taskMode === 'diagram' &&
             h(
               'div',
@@ -2651,25 +3057,28 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
             ),
 
           // 「换视角 / 风格迁移」不摆风格选择器：它只会误导用户去换风格。
-          styleFixed
-            ? h(
-                'div',
-                { className: 'cr-note' },
-                STYLE_FIXED_NOTE[taskMode] ?? '这个操作不需要选风格，材质来源已由操作本身决定。',
-              )
-            : h(
-                'div',
-                { className: 'cr-label', style: { marginTop: '4px' } },
-                styleLabel,
-                h(
-                  'span',
-                  null,
-                  `按「${operations.find((item) => item.id === taskMode)?.label ?? '当前操作'}」自动切换${
-                    styleIds.length > 1 ? ' · 可多选 = 一次出多套方案' : ''
-                  }`,
-                ),
-              ),
-          !styleFixed &&
+          // 本地超分同理，而且更彻底 —— 它连画面内容都不改，哪来的风格。
+          !localMode &&
+            (styleFixed
+              ? h(
+                  'div',
+                  { className: 'cr-note' },
+                  STYLE_FIXED_NOTE[taskMode] ?? '这个操作不需要选风格，材质来源已由操作本身决定。',
+                )
+              : h(
+                  'div',
+                  { className: 'cr-label', style: { marginTop: '4px' } },
+                  styleLabel,
+                  h(
+                    'span',
+                    null,
+                    `按「${operations.find((item) => item.id === taskMode)?.label ?? '当前操作'}」自动切换${
+                      styleIds.length > 1 ? ' · 可多选 = 一次出多套方案' : ''
+                    }`,
+                  ),
+                )),
+          !localMode &&
+            !styleFixed &&
             h(
               'div',
               { className: 'cr-styles' },
@@ -2912,6 +3321,10 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               ),
             ),
 
+          // 本地超分没有提示词可写：引擎只认倍数与模型，写字也不会被用到。
+          // 留着这个框只会让用户以为「写了能影响超分」。
+          ...(!localMode
+            ? [
           h(
             'div',
             { className: 'cr-label', style: { marginTop: '4px' } },
@@ -2957,31 +3370,35 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               disabled: busy,
               onChange: (event) => setComposed(event.target.value),
             }),
+              ]
+            : []),
 
-          h(
-            'div',
-            { className: 'cr-row' },
+          // 云通道选择器：本地超分不经过任何云服务，摆出来只会误导。
+          !localMode &&
             h(
               'div',
-              { className: 'cr-seg' },
-              PROVIDERS.map((item) =>
-                h(
-                  'button',
-                  {
-                    key: item.id,
-                    'data-active': provider === item.id ? '1' : '0',
-                    onClick: () => {
-                      providerTouchedRef.current = true
-                      setProvider(item.id)
+              { className: 'cr-row' },
+              h(
+                'div',
+                { className: 'cr-seg' },
+                PROVIDERS.map((item) =>
+                  h(
+                    'button',
+                    {
+                      key: item.id,
+                      'data-active': provider === item.id ? '1' : '0',
+                      onClick: () => {
+                        providerTouchedRef.current = true
+                        setProvider(item.id)
+                      },
+                      disabled: busy,
+                      title: item.hint,
                     },
-                    disabled: busy,
-                    title: item.hint,
-                  },
-                  item.label,
+                    item.label,
+                  ),
                 ),
               ),
             ),
-          ),
           h(
             'div',
             { className: 'cr-note' },
@@ -3028,12 +3445,16 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               onClick: () => run(),
             },
             busy
-              ? '生成中…'
+              ? localMode
+                ? '超分中…'
+                : '生成中…'
               : refineFrom
                 ? '应用修改'
-                : styleIds.length > 1
-                  ? `生成 ${styleIds.length} 套方案`
-                  : '生成效果图',
+                : localMode
+                  ? `本地 GPU 超分 × ${esrgan.scale}`
+                  : styleIds.length > 1
+                    ? `生成 ${styleIds.length} 套方案`
+                    : '生成效果图',
           ),
           busy && h('span', { className: 'cr-spin' }),
           // 改图态在底部也显示一次：用户是在结果区点「改这张」的，

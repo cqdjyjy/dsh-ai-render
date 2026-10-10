@@ -44,6 +44,16 @@ import {
   resolveTaskMode,
   resolveStyle,
 } from './presets.js'
+import {
+  ESRGAN_LIMITS,
+  ESRGAN_MODELS,
+  ESRGAN_RELEASE_URL,
+  esrganToolsDir,
+  installEsrgan,
+  locateEsrgan,
+  probeEsrgan,
+  runUpscale,
+} from './esrgan.js'
 
 export const name = 'ai-render'
 export { parseJobInput, fitSize, serviceOf, agyPrompt, harvestAgyImages, agyHomeDir, agyIndex, walkDir }
@@ -123,6 +133,19 @@ openaiQuality: '',
   // 出图后自动视觉质检，结构不过关就带着修正意见重出一。
 autoQc: '1',
   defaultProvider: 'ark',
+  // ---- 本地 GPU 超分（Real-ESRGAN ncnn Vulkan，完全不联网、不花钱）----
+  // 引擎路径。留空 = 依次找「插件自管目录」和 PATH。
+  esrganBin: '',
+  esrganModel: 'realesrgan-x4plus',
+  esrganScale: '4',
+  // tile 是显存占用的唯一旋钮。默认 64：实测 4GB 的 Kepler 卡（Quadro K4200）
+  // 在 128 上稳定出全黑，在 64 上正常 —— 保守默认比「先跑失败一次再降档」体验好得多。
+  // 显存够的卡可以调到 192 / 256，会快不少；0 = 交给 ncnn 自己算。
+  esrganTile: '64',
+  esrganGpu: '',
+  esrganTta: '0',
+  // 下载地址留一个覆盖口：国内直连 GitHub 经常不通，可以填镜像地址。
+  esrganDownloadUrl: '',
   outputDir: '',
   maxSide: 2048,
   // 异步任务要排。轮询，默认给。10 分钟
@@ -153,6 +176,13 @@ const SETTABLE = [
   'openaiImageMode',
   'autoQc',
   'defaultProvider',
+  'esrganBin',
+  'esrganModel',
+  'esrganScale',
+  'esrganTile',
+  'esrganGpu',
+  'esrganTta',
+  'esrganDownloadUrl',
   'outputDir',
 ]
 
@@ -1493,11 +1523,14 @@ function presetsCatalog() {
   return {
     ok: true,
     action: 'presets',
-    taskModes: TASK_MODES.map(({ id, label, hint, noBase }) => ({
+    taskModes: TASK_MODES.map(({ id, label, hint, noBase, local }) => ({
       id,
       label,
       hint,
       noBase: Boolean(noBase),
+      // 本地操作（目前只有本地超分）：面板据此换掉整个「风格/光影/构图」区，
+      // 改画引擎状态与倍数/模型/tile —— 它跟云通道要填的东西完全不一样。
+      local: Boolean(local),
       // 面板据此决定显示哪些控件：彩平图不该有光。构图选择器。
 ui: uiOf(id),
       styleFixed: styleIsFixedToBase(id),
@@ -1584,6 +1617,264 @@ async function collectImages(ctx, invocation) {
     if (images.length >= MAX_ATTACHMENTS) break
   }
   return images
+}
+
+// ---------------------------------------------------------------- 本地 GPU 超分
+
+/**
+ * 取宿主 subprocess 服务的「可执行文件解析」能力。
+ *
+ * 有它才能解析 PATH 上的裸命令名（Windows 上很多工具是 .cmd / .ps1 shim，
+ * 直接 spawn 会 ENOENT）。没有也不致命 —— 还有「设置里的路径」和
+ * 「插件自管目录」两条路。
+ */
+function subprocessResolver(ctx) {
+  try {
+    const subprocess = typeof ctx.get === 'function' ? ctx.get('subprocess') : undefined
+    if (subprocess?.resolveExecutable) return (name) => subprocess.resolveExecutable(name)
+  } catch {
+    /* 宿主没这个服务就算了 */
+  }
+  return undefined
+}
+
+/**
+ * 这个 job 是不是要走**本地 GPU 超分**。
+ *
+ * 两个入口：
+ *   1. 独立操作「本地超分」（taskMode = superres / action = superres）
+ *   2. 「洗图 / 高清」的后端切到本地（taskMode = wash 且 washBackend = local）
+ *
+ * 本地超分**不需要 API Key、不联网**，所以绝不能掉进 generate() 里那段
+ * 「还没配置 Key」的判断 —— 那正是「填了没生效 / 明明本地却要 Key」的来源。
+ */
+function wantsLocalUpscale(job) {
+  if (!job) return false
+  if (job.action === 'superres' || job.taskMode === 'superres') return true
+  if (job.localUpscale === true) return true
+  if (job.taskMode === 'wash' && String(job.washBackend ?? '').trim() === 'local') return true
+  return false
+}
+
+/** 取一个本地超分参数：面板传的 > 设置文件 > 内置默认。 */
+function esrganOption(settings, job, key, fallback) {
+  const fromJob = job?.[key]
+  if (fromJob !== undefined && fromJob !== null && String(fromJob).trim() !== '') return String(fromJob).trim()
+  const fromSettings = settings?.[key]
+  if (fromSettings !== undefined && fromSettings !== null && String(fromSettings).trim() !== '') {
+    return String(fromSettings).trim()
+  }
+  return fallback
+}
+
+/** 放大倍数只认 2/3/4（引擎本身也只支持这三个）。 */
+function esrganScaleOf(settings, job) {
+  const value = Number(esrganOption(settings, job, 'esrganScale', '4'))
+  return [2, 3, 4].includes(value) ? value : 4
+}
+
+/** tile：0 = 自动；其余压到 >=32（ncnn 下限）。 */
+function esrganTileOf(settings, job) {
+  const value = Number(esrganOption(settings, job, 'esrganTile', '64'))
+  if (!Number.isFinite(value) || value <= 0) return 0
+  return Math.max(ESRGAN_LIMITS.minTile, Math.round(value))
+}
+
+function esrganModelOf(settings, job) {
+  const value = esrganOption(settings, job, 'esrganModel', 'realesrgan-x4plus')
+  return ESRGAN_MODELS.some((item) => item.id === value) ? value : 'realesrgan-x4plus'
+}
+
+/** 引擎现状：装没装、在哪、认不认得到 GPU。面板据此决定显示「可用」还是「下载引擎」。 */
+async function localUpscaleStatus(ctx, settings, { probe = false, cwd = '', outDir = '' } = {}) {
+  const home = dshHome()
+  const located = await locateEsrgan({
+    settings,
+    dshHome: home,
+    resolveExecutable: subprocessResolver(ctx),
+  })
+  const modelsDir = located?.modelsDir ?? ''
+  let modelsPresent = false
+  if (modelsDir) {
+    try {
+      modelsPresent = (await fsp.readdir(modelsDir)).some((name) => name.endsWith('.bin'))
+    } catch {
+      modelsPresent = false
+    }
+  }
+  const result = {
+    ok: true,
+    action: 'esrgan-status',
+    installed: Boolean(located),
+    bin: located?.bin ?? '',
+    modelsDir,
+    modelsPresent,
+    source: located?.source ?? '',
+    toolsDir: esrganToolsDir(home),
+    downloadUrl: esrganOption(settings, {}, 'esrganDownloadUrl', '') || ESRGAN_RELEASE_URL,
+    defaultDownloadUrl: ESRGAN_RELEASE_URL,
+    models: ESRGAN_MODELS.map(({ id, label, hint, scales }) => ({ id, label, hint, scales })),
+    scale: esrganScaleOf(settings, {}),
+    tile: esrganTileOf(settings, {}),
+    model: esrganModelOf(settings, {}),
+    gpu: esrganOption(settings, {}, 'esrganGpu', ''),
+    tta: String(esrganOption(settings, {}, 'esrganTta', '0')) === '1',
+    limits: ESRGAN_LIMITS,
+  }
+  if (probe) {
+    if (!located) {
+      result.probe = { ok: false, runnable: false, devices: [], reason: '还没装引擎。' }
+      return result
+    }
+    // 探针也要真算一张图，所以同样需要一个「确认可写」的目录：给出图目录。
+    // outDir 必须跟着这次调用的 job 走 —— 否则会按会话 cwd 另建一个
+    // 「AI效果图」目录，白白多出一个空文件夹（实测踩到过）。
+    // 出图目录建不出来（权限/磁盘满）时退回系统 temp，至少还能试。
+    let probeDir = ''
+    try {
+      const dir = resolveOutputDir(settings, outDir, cwd)
+      await fsp.mkdir(dir, { recursive: true })
+      probeDir = await fsp.mkdtemp(path.join(dir, '.esrgan-probe-'))
+    } catch {
+      probeDir = ''
+    }
+    try {
+      result.probe = await probeEsrgan({
+        bin: located.bin,
+        modelsDir: located.modelsDir,
+        model: result.model,
+        tile: result.tile,
+        gpu: result.gpu,
+        tmpDir: probeDir || undefined,
+      })
+    } finally {
+      if (probeDir) await fsp.rm(probeDir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+  return result
+}
+
+/**
+ * 跑一次本地 GPU 超分，并把结果落到出图目录。
+ *
+ * 输入取「第 1 张附件」：面板无论是「导入底图」还是结果卡片上的「洗这张」，
+ * 都是把它当底图传过来的，所以这里和云通道的图号约定保持一致 —— 图1 就是要超分的那张。
+ */
+async function runLocalUpscale(ctx, settings, job, invocation) {
+  const started = Date.now()
+  const session = ctx.sessions.get(invocation.agent.id)
+  const cwd = session?.header?.cwd
+
+  const images = await collectImages(ctx, invocation)
+  if (!images.length) {
+    throw new Error(
+      '本地超分需要一张图：请先导入底图，或者在结果卡片上点「洗这张」把要超分的那张设成底图。',
+    )
+  }
+  const source = images[0]
+
+  const located = await locateEsrgan({
+    settings,
+    dshHome: dshHome(),
+    resolveExecutable: subprocessResolver(ctx),
+  })
+  if (!located) {
+    throw new Error(
+      '还没装本地超分引擎（Real-ESRGAN ncnn Vulkan）。' +
+        `\n两个办法：① 在面板里点「下载引擎」，它会装到 ${esrganToolsDir(dshHome())}；` +
+        '\n② 自己下好解压，再把「引擎路径」指向 realesrgan-ncnn-vulkan.exe。' +
+        `\n官方下载：${esrganOption(settings, job, 'esrganDownloadUrl', '') || ESRGAN_RELEASE_URL}`,
+    )
+  }
+
+  const model = esrganModelOf(settings, job)
+  const scale = esrganScaleOf(settings, job)
+  const tile = esrganTileOf(settings, job)
+  const gpu = esrganOption(settings, job, 'esrganGpu', '')
+  const tta = String(esrganOption(settings, job, 'esrganTta', '0')) === '1'
+  const timeoutMs = Number(settings.timeoutMs) > 0 ? Number(settings.timeoutMs) : 600000
+
+  const dir = resolveOutputDir(settings, job.outDir, cwd)
+  await fsp.mkdir(dir, { recursive: true })
+
+  // 中间文件放在**出图目录**里，不放系统 temp。
+  //
+  // 实测踩到的坑：这台机器上引擎对 C: 盘整盘写不进去（系统 temp、桌面、用户目录
+  // 全试过，都报 `encode image ... failed`，而且退出码是 0），换到 D: 就正常。
+  // 最终那张图本来就要写进出图目录，所以这里一定可写 —— 用它最稳。
+  const work = await fsp.mkdtemp(path.join(dir, '.esrgan-'))
+  let outcome
+  try {
+    outcome = await runUpscale({
+      bin: located.bin,
+      modelsDir: located.modelsDir,
+      inputBuffer: source.data,
+      model,
+      scale,
+      tile,
+      gpu,
+      tta,
+      timeoutMs,
+      signal: invocation.signal,
+      tmpDir: work,
+      maxSide: ESRGAN_LIMITS.hardSide,
+    })
+  } finally {
+    await fsp.rm(work, { recursive: true, force: true }).catch(() => {})
+  }
+
+  const fileName = `upscale_${stamp()}_${scale}x.png`
+  const filePath = path.join(dir, fileName)
+  await fsp.writeFile(filePath, outcome.buffer)
+  const relativePath =
+    typeof cwd === 'string' && cwd.trim() ? path.relative(path.resolve(cwd), filePath) : undefined
+
+  const deviceLabel = outcome.devices.length
+    ? outcome.devices.map((item) => item.name).join('、')
+    : '（引擎没报告设备名）'
+
+  return {
+    ok: true,
+    provider: 'local',
+    providerLabel: '本地 GPU 超分 · Real-ESRGAN Vulkan',
+    model,
+    modeUsed: 'vulkan',
+    taskMode: 'superres',
+    stylePreset: 'as-is',
+    lighting: 'auto',
+    refined: false,
+    size: `${outcome.width}x${outcome.height}`,
+    sourceSize: `${outcome.inputWidth}x${outcome.inputHeight}`,
+    sizeNotice: '',
+    // 本地超分没有提示词，但历史记录与面板都用这个字段，给一句人能看懂的就够。
+    prompt: `本地 GPU 超分：${model} × ${scale}（tile ${outcome.tile || 'auto'}）· GPU：${deviceLabel}`,
+    dir,
+    workspaceRoot: typeof cwd === 'string' && cwd.trim() ? path.resolve(cwd) : undefined,
+    files: [
+      { name: fileName, path: filePath, relativePath, bytes: outcome.buffer.length },
+    ],
+    elapsedMs: Date.now() - started,
+    local: {
+      engine: located.bin,
+      engineSource: located.source,
+      modelsDir: located.modelsDir,
+      device: deviceLabel,
+      devices: outcome.devices,
+      scale,
+      tile: outcome.tile,
+      tta,
+      model,
+      inputSize: `${outcome.inputWidth}x${outcome.inputHeight}`,
+      outputSize: `${outcome.width}x${outcome.height}`,
+      // 自动降 tile / 没做纯色比对这类事必须说出来，不能悄悄发生
+      warnings: outcome.warnings,
+      attempts: outcome.attempts.map((item) => ({
+        tile: item.tile,
+        elapsedMs: item.elapsedMs,
+        exitCode: item.exitCode,
+      })),
+    },
+  }
 }
 
 async function generate(ctx, settings, job, invocation) {
@@ -1893,7 +2184,30 @@ const candidate = { ...settings }
         }
         // 设置文件坏了就说清是文件的问题，而不是含糊地报「还没配。Key」。
 if (loaded.error) throw new Error(loaded.error)
-        const result = await generateWithQc(ctx, settings, job, invocation)
+
+        // ---- 本地 GPU 超分：完全不联网、不需要 Key，所以必须走在所有
+        // 「云通道校验」之前。放后面的话会被「还没配置 API Key」拦住。
+        if (job.action === 'esrgan-status') {
+          return {
+            kind: 'success',
+            text: JSON.stringify(
+              await localUpscaleStatus(ctx, settings, { probe: job.probe === true, cwd, outDir: job.outDir }),
+            ),
+          }
+        }
+        if (job.action === 'esrgan-install') {
+          const url = String(job.esrganDownloadUrl ?? '').trim() || esrganOption(settings, job, 'esrganDownloadUrl', '') || ESRGAN_RELEASE_URL
+          const installed = await installEsrgan({ dshHome: dshHome(), url, signal: invocation.signal })
+          const status = await localUpscaleStatus(ctx, settings, { probe: true, cwd, outDir: job.outDir })
+          return {
+            kind: 'success',
+            text: JSON.stringify({ ...status, installed: true, installedFrom: url, install: installed }),
+          }
+        }
+
+        const result = wantsLocalUpscale(job)
+          ? await runLocalUpscale(ctx, settings, job, invocation)
+          : await generateWithQc(ctx, settings, job, invocation)
         // 记一条历史，让面板能「还原参数再来一张」。
 // 记历史失败绝不能让出图结果丢。—。图已经出了，这是主要价值。
   let record = null
@@ -1930,14 +2244,20 @@ if (loaded.error) throw new Error(loaded.error)
       } catch (error) {
         const subject =
           job.action === 'probe'
-            ? '中转站探测失。'
+            ? '中转站探测失败'
             : job.action === 'configure'
               ? '保存配置失败'
               : job.action === 'read'
-                ? '读图出结构失。'
+                ? '读图出结构失败'
                 : job.action === 'compose'
-                  ? '提示词润色失。'
-                  : '效果图生成失败'
+                  ? '提示词润色失败'
+                  : job.action === 'esrgan-install'
+                    ? '下载超分引擎失败'
+                    : job.action === 'esrgan-status'
+                      ? '检测超分引擎失败'
+                      : wantsLocalUpscale(job)
+                        ? '本地 GPU 超分失败'
+                        : '效果图生成失败'
         return { kind: 'error', text: `${subject}：${errorMessage(error)}` }
       }
     },

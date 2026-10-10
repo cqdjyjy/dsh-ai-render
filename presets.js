@@ -89,6 +89,32 @@ const TASK_MODES = [
     cleanupShort: '清除噪点、色带、块状伪影、锯齿、摩尔纹与过度锐化的光晕。',
   },
   {
+    // 本地 GPU 超分（用户叫它「DLSS5 洗图」）。
+    //
+    // 这个操作**不走任何云通道**：宿主编直接用本机的 Real-ESRGAN ncnn Vulkan
+    // 跑 GPU 超分，不联网、不花钱、也不需要 API Key —— 是这里唯一一个
+    // 「运算全在本机完成」的操作。所以 ui 里把风格 / 光影 / 构图 / 读图 / 质检
+    // 全关掉：超分不改画面内容，摆这些选择器只会误导。
+    //
+    // frame / structure 这些字段在本地路径下用不到，但保留一份合理文案：
+    // 万一被当云操作调用（老面板、或用户手写命令），也不会组装出一个空提示词。
+    id: 'superres',
+    label: '本地超分',
+    hint:
+      '用本机 GPU（Real-ESRGAN Vulkan）把图放大并洗一遍：免 Key、不联网、不花钱。' +
+      '需要一块能跑 Vulkan 的显卡；跑不动时会明确报错，不会给你一张废图',
+    local: true,
+    frame: '把图1无损放大并提升清晰度，画面内容一律不动。',
+    frameShort: '把图1无损放大并提升清晰度。',
+    structure:
+      '图1的一切内容必须原样保留：构图与视角、轮廓与长宽比例、分格结构、构件数量位置、材质与颜色、光影关系，一律不得增删或重新设计，只提升分辨率与细节清晰度。',
+    structureShort: '图1的构图、结构、材质、光影与配色必须 100% 原样保留，只提升分辨率。',
+    view: '完全保持图1的机位、透视与构图不变，不换角度、不重新取景、不裁切。',
+    viewShort: '完全保持图1的机位、透视与构图不变。',
+    cleanup: '清除放大带来的噪点、振铃与过度锐化的白边，保持自然的细节过渡。',
+    cleanupShort: '清除噪点、振铃与过度锐化的白边。',
+  },
+  {
     id: 'photo',
     label: '实拍照片',
     hint: '现场实拍照片 → 材质升级、去杂乱、提升画质',
@@ -720,7 +746,7 @@ const AS_IS_STYLE = {
 /** 这些操作画面上有可继承的材质，允许「沿用底图」。 */
 // wash（洗图）也必须在这里：洗图只提画质，材质/光影/配色一律以图1为准，
 // 一旦让风格模板参与进来，就会把原图的材质换掉 —— 那就不是洗图了。
-const MODE_INHERITS_STYLE = new Set(['view-switch', 'photo', 'wash'])
+const MODE_INHERITS_STYLE = new Set(['view-switch', 'photo', 'wash', 'superres'])
 
 /**
  * 风格按组划分，组再按操作分配。
@@ -750,6 +776,8 @@ const MODE_STYLE_GROUPS = {
   'style-transfer': ['none'],
   // 同空间换机位，材质色彩必须沿用底图
   'view-switch': ['none'],
+  // 本地超分不改画面内容，没有「换个风格」这回事
+  superres: ['none'],
   text2img: ['interior', 'concept'],
 }
 
@@ -769,6 +797,9 @@ const MODE_UI = {
   'style-transfer': { camera: false },
   // 没有底图可以读，也没有底图可以比对
   text2img: { read: false, qc: false },
+  // 本地超分：不走云通道，风格 / 光影 / 构图 / 读图 / 质检一个都不需要。
+  // local 这个开关让面板改画「引擎状态 + 倍数 + 模型 + tile」那一套控件。
+  superres: { local: true, style: false, lighting: false, camera: false, read: false, qc: false, quick: false },
 }
 
 const DEFAULT_UI = {
@@ -778,6 +809,8 @@ const DEFAULT_UI = {
   read: true,
   qc: true,
   quick: true,
+  style: true,
+  local: false,
 }
 
 /** 取某个操作的界面开关（缺省全开）。 */

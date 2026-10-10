@@ -168,7 +168,7 @@ const refBlock = await imageBlock(path.join(here, 'fixtures', 'user-ref-wood.jpg
 
 console.log('== 1. 目录暴露 ==')
 const catalog = await call({ action: 'presets' })
-check(catalog.taskModes.length === 12, `操作 12 个（实为 ${catalog.taskModes.length}）`)
+check(catalog.taskModes.length === 13, `操作 13 个（实为 ${catalog.taskModes.length}）`)
 check(catalog.diagrams.length === 5, `分析图类型 5 个（实为 ${catalog.diagrams.length}）`)
 check(catalog.quickActions.length === 8, `一键操作 8 个（实为 ${catalog.quickActions.length}）`)
 check(
@@ -184,6 +184,12 @@ check(
   catalog.taskModes.find((mode) => mode.id === 'style-transfer')?.styleFixed === true,
   '风格迁移标记为「不选风格」',
 )
+// 本地超分：唯一一个「运算全在本机」的操作，面板要据此换成引擎那一套控件
+const superres = catalog.taskModes.find((mode) => mode.id === 'superres')
+check(superres?.local === true, '本地超分标记为「本地操作」')
+check(superres?.ui?.local === true, '本地超分下发给面板 local 开关')
+check(superres?.ui?.style === false && superres?.ui?.lighting === false, '本地超分不显示风格与光影')
+check(superres?.ui?.read === false && superres?.ui?.qc === false, '本地超分不显示读图与质检')
 check(
   catalog.taskModes.find((mode) => mode.id === 'plan')?.ui?.lighting === false,
   '平面图标记为「不显示光影」',

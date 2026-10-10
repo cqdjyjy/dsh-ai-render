@@ -37,3 +37,21 @@
         # 异步任务要排队 + 轮询，默认给足 10 分钟
         timeoutMs: 600000
         promptTemplate: ''
+        # ---- 本地 GPU 超分（Real-ESRGAN ncnn Vulkan，不联网、不花钱）----
+        # 引擎路径。留空 = 依次找「插件自管目录」和系统 PATH；
+        # 面板上的「下载引擎」会把它装到 <DSH_HOME>/ai-render/tools/realesrgan。
+        esrganBin: ''
+        # realesrgan-x4plus（写实，推荐）| realesrgan-x4plus-anime | realesr-animevideov3（最省显存）
+        esrganModel: realesrgan-x4plus
+        # 2 | 3 | 4
+        esrganScale: '4'
+        # 显存占用的唯一旋钮：越小越不容易爆显存，但越慢。0 = 交给 ncnn 自己算。
+        # 默认 64：实测 4GB 的 Kepler 卡（Quadro K4200）在 128 上稳定出全黑、在 64 上正常。
+        # 显存够可以调 192 / 256（快不少）；跑失败时插件会自动降一档重试。
+        esrganTile: '64'
+        # 多卡时指定用哪块（-g），留空 = auto
+        esrganGpu: ''
+        # TTA 增强（-x）：每个 tile 算 8 遍再平均，更干净但慢 8 倍左右
+        esrganTta: '0'
+        # 下载地址覆盖口：国内直连 GitHub 经常不通，可以填镜像地址
+        esrganDownloadUrl: ''

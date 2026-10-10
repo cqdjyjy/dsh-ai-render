@@ -47,7 +47,7 @@ const check = (condition, label) => {
 const SECTION_ORDER = ['【结构锁死】', '【视角构图】', '【材质色彩】', '【光影】', '【清除】', '【画质】']
 
 console.log('\n== 1. 目录完整性 ==')
-check(TASK_MODES.length === 12, `操作 12 个（实为 ${TASK_MODES.length}）`)
+check(TASK_MODES.length === 13, `操作 13 个（实为 ${TASK_MODES.length}）`)
 check(STYLE_PRESETS.length === 30, `风格预设 30 个（实为 ${STYLE_PRESETS.length}）`)
 check(LIGHTING_PRESETS.length === 5, `光影预设 5 个（实为 ${LIGHTING_PRESETS.length}）`)
 check(
