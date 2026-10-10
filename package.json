@@ -19,6 +19,8 @@
     "index.js",
     "client.js",
     "presets.js",
+    "esrgan.js",
+    "pngzip.js",
     "icon.svg",
     "cordis.patch.yml",
     "locale/*.json"
