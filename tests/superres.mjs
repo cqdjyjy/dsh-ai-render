@@ -31,6 +31,8 @@ import {
   diagnoseEngineOutput,
   parseDevices,
   probePng,
+  sniffImageFormat,
+  sniffImageSize,
   validateUpscale,
 } from '../esrgan.js'
 import { readPngStats } from '../pngzip.js'
@@ -369,6 +371,16 @@ console.log('\n== 3. 单测：参数 / 日志解析 / 结果校验 ==')
   check(probe.max - probe.min > 2, `probePng: 有内容（亮度 ${probe.min}~${probe.max}）`)
   check(readPngStats(probePng(4096))?.width === 1024, 'probePng: 尺寸有上限，不会造出巨图')
 
+  // 输入格式识别：**按字节判，不看后缀**
+  const jpegFixture = await fsp.readFile(path.join(here, 'fixtures', 'user-ref-wood.jpg'))
+  check(sniffImageFormat(cadBytes) === 'png', 'sniffFormat: PNG 认得出')
+  check(sniffImageFormat(jpegFixture) === 'jpg', 'sniffFormat: JPEG 认得出')
+  check(sniffImageFormat(Buffer.from('这不是图片')) === '', 'sniffFormat: 垃圾字节返回空串')
+  const jpegSize = sniffImageSize(jpegFixture)
+  check(jpegSize.width > 0 && jpegSize.height > 0, `sniffSize: JPEG 能量出宽高（${jpegSize.width}×${jpegSize.height}）`)
+  check(JSON.stringify(sniffImageSize(cadBytes)) === `{"width":${cadStats.width},"height":${cadStats.height}}`, 'sniffSize: PNG 宽高与解码器一致')
+  check(sniffImageSize(Buffer.from('nope')) .width === 0, 'sniffSize: 垃圾字节返回 0')
+
   // validateUpscale：纯色判定要跟**输入**比，不能只看输出黑不黑
   const black = buildBlackPng(8, 8)
   const content = buildContentPng(8, 8)
@@ -408,6 +420,30 @@ console.log('\n== 3. 单测：参数 / 日志解析 / 结果校验 ==')
 
   const garbage = validateUpscale({ outputBuffer: Buffer.from('not a png'), inputStats: inputHasContent, scale: 2 })
   check(garbage.ok === false && /解不开/.test(garbage.problems.join(' ')), 'validate: 坏文件 → 判失败')
+
+  // 非 PNG 输入（比如 JPEG）时的兜底：拿不到输入像素，但**完全纯色**的输出仍要判失败
+  // ——K4200 的经典故障就是「退出码 0 + 一张全黑图」，不能因为输入不是 PNG 就放行
+  const unknownInput = validateUpscale({
+    outputBuffer: black,
+    inputStats: null,
+    scale: 1,
+    inputWidth: 8,
+    inputHeight: 8,
+  })
+  check(unknownInput.ok === false, 'validate: 输入格式未知 + 输出完全纯色 → 仍然判失败')
+  check(
+    /完全没有任何变化/.test(unknownInput.problems.join(' ')),
+    'validate: 说清「这次没法比对输入」（不假装有把握）',
+  )
+  const unknownInputOk = validateUpscale({
+    outputBuffer: content,
+    inputStats: null,
+    scale: 1,
+    inputWidth: 8,
+    inputHeight: 8,
+  })
+  check(unknownInputOk.ok === true, 'validate: 输入格式未知但输出有内容 → 放行')
+  check(unknownInputOk.advanced.length > 0, 'validate: 仍然如实记下「没能做输入比对」')
 
   check(ESRGAN_LIMITS.minTile === 32 && ESRGAN_LIMITS.hardSide === 16384, 'limits: 下限/硬上限都在')
 }
@@ -534,6 +570,61 @@ console.log('\n== 4.5 层次增强（本地色调后处理，默认关闭）==')
   )
   setMode(null)
   check(clamped.local.detail === 100, `强度超上限被夹到 100（实为 ${clamped.local.detail}）`)
+}
+
+// ---------------------------------------------------------------- 4.6 JPEG 底图
+console.log('\n== 4.6 JPEG 底图也能本地超分（曾经只认 PNG，把用户挡在门外）==')
+{
+  // 回归来源：客户端一度把「照片型底图」自动编成 JPEG，而宿主写死「只接受 PNG」，
+  // 用户明明上传的是 PNG 却收到「输入图不是可解析的 8 位 PNG」。
+  // 现在宿主按字节认格式，png / jpg / webp 都收。
+  const jpgPath = path.join(here, 'fixtures', 'user-ref-wood.jpg')
+  const jpegBytes = await fsp.readFile(jpgPath)
+  const jpegSize = sniffImageSize(jpegBytes)
+  const jpegBlock = {
+    type: 'image',
+    attachment: {
+      attachmentId: 'wood.jpg',
+      mediaType: 'image/jpeg',
+      bytes: jpegBytes.length,
+      width: jpegSize.width,
+      height: jpegSize.height,
+      name: 'wood.jpg',
+      __file: jpgPath,
+    },
+  }
+  setMode('ok')
+  const result = await call({ taskMode: 'superres', esrganScale: '2', esrganTile: '128' }, [jpegBlock])
+  setMode(null)
+  check(result.ok === true, 'JPEG 底图本地超分成功')
+  check(result.size === `${jpegSize.width * 2}x${jpegSize.height * 2}`, `尺寸按 JPEG 的宽高算：${result.size}`)
+  check(
+    result.local.warnings.some((text) => text.includes('不是 8 位 PNG')),
+    '如实说明「这次没能做输入像素比对」（不假装有把握）',
+  )
+
+  // 完全不是图片的字节：要说清「认不出格式」，而不是含糊报错
+  const junkPath = path.join(here, '.junk-not-an-image.bin')
+  await fsp.writeFile(junkPath, Buffer.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]))
+  setMode('ok')
+  const junk = await callError({ taskMode: 'superres' }, [
+    {
+      type: 'image',
+      attachment: {
+        attachmentId: 'x.png',
+        mediaType: 'image/png',
+        bytes: 12,
+        width: 0,
+        height: 0,
+        name: 'x.png',
+        __file: junkPath,
+      },
+    },
+  ])
+  setMode(null)
+  await fsp.rm(junkPath, { force: true })
+  check(!junk.ok, '非图片字节：判失败')
+  check(/认不出这个格式/.test(junk.text), `非图片字节：说清是格式认不出（${junk.text.slice(0, 46)}…）`)
 }
 
 // ---------------------------------------------------------------- 5. 纯黑必须是失败

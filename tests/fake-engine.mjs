@@ -22,6 +22,7 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 import { fileURLToPath } from 'node:url'
 import { readPngStats } from '../pngzip.js'
+import { sniffImageFormat, sniffImageSize } from '../esrgan.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 
@@ -161,15 +162,21 @@ if (mode === 'bad-model') {
   process.exit(1)
 }
 
-// 量输入尺寸：真引擎的放大倍数是精确的整数倍，这里必须一样，
-// 否则「尺寸对不对」这条校验就没意义了。
+// 量输入尺寸：真引擎 png / jpg / webp 都认（它自己解码），这里用同一套头部解析，
+// 免得「假引擎只认 PNG」把「宿主接受了 JPEG」这条路径测不到。
 let inputWidth = 0
 let inputHeight = 0
 try {
-  const stats = readPngStats(await fsp.readFile(input))
-  if (stats) {
-    inputWidth = stats.width
-    inputHeight = stats.height
+  const inputBuffer = await fsp.readFile(input)
+  const format = sniffImageFormat(inputBuffer)
+  if (!format) {
+    console.error(`decode image ${input} failed`)
+    process.exit(1)
+  }
+  ;({ width: inputWidth, height: inputHeight } = sniffImageSize(inputBuffer))
+  if (!inputWidth || !inputHeight) {
+    console.error('failed to load input')
+    process.exit(1)
   }
 } catch {
   console.error('failed to load input')

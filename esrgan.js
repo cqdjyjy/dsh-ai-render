@@ -76,6 +76,59 @@ export const ESRGAN_LIMITS = {
   minTile: 32,
 }
 
+// ---------------------------------------------------------------- 输入格式
+
+/** PNG 签名。 */
+const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+/**
+ * 按**字节**认图片格式（不看文件名后缀）。认不出返回空串。
+ *
+ * 引擎本身 png / jpg / webp 都收，所以本地超分**不该只认 PNG**。
+ * 踩过的坑：客户端一度为了省请求体积把「照片型底图」自动编成 JPEG，而宿主这里
+ * 写死了「只接受 PNG」—— 于是用户明明上传的是 PNG，却收到
+ * 「输入图不是可解析的 8 位 PNG」。现在两头都放开了：客户端底图固定 PNG，
+ * 宿主也能收 JPEG / WebP。
+ */
+export function sniffImageFormat(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 12) return ''
+  if (buffer.subarray(0, 8).equals(PNG_SIG)) return 'png'
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) return 'jpg'
+  if (buffer.toString('latin1', 0, 4) === 'RIFF' && buffer.toString('latin1', 8, 12) === 'WEBP') return 'webp'
+  return ''
+}
+
+/**
+ * 从字节直接量宽高（PNG / JPEG）。量不出来返回 {width:0, height:0}。
+ *
+ * 为什么需要：非 PNG 输入时我们**解不了像素**（没有 JPEG 解码器，也不该为此引依赖），
+ * 但「输出尺寸必须等于 输入 × 倍数」这条校验仍然想要 —— 那只要宽高就够了。
+ */
+export function sniffImageSize(buffer) {
+  const none = { width: 0, height: 0 }
+  if (!Buffer.isBuffer(buffer) || buffer.length < 24) return none
+  if (buffer.subarray(0, 8).equals(PNG_SIG)) {
+    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) }
+  }
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) {
+    let offset = 2
+    while (offset + 9 < buffer.length) {
+      if (buffer[offset] !== 0xff) {
+        offset += 1
+        continue
+      }
+      const marker = buffer[offset + 1]
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { height: buffer.readUInt16BE(offset + 5), width: buffer.readUInt16BE(offset + 7) }
+      }
+      const length = buffer.readUInt16BE(offset + 2)
+      if (length <= 0) return none
+      offset += 2 + length
+    }
+  }
+  return none
+}
+
 // ---------------------------------------------------------------- 探针图
 
 /**
@@ -351,7 +404,17 @@ export function validateUpscale({ outputBuffer, inputStats, scale, inputWidth, i
         `输出却完全没有变化（${stats.min}~${stats.max}）。说明 GPU 没有真正算出结果。`,
     )
   } else if (!inputStats) {
-    advanced.push('输入图不是 8 位 PNG，没能做「输入有内容 / 输出纯色」的比对。')
+    // 输入不是 PNG（比如 JPEG）→ 解不了像素，比对不了。
+    // **但绝不能因此放行一切**：完全没有任何变化的纯色输出还是要拦下来 ——
+    // 那台 K4200 的经典故障就是「退出码 0 + 一张全黑图」。
+    advanced.push('输入图不是 8 位 PNG，没能做「输入有内容 / 输出纯色」的逐项比对。')
+    if (stats.max === stats.min) {
+      problems.push(
+        '输出是**完全没有任何变化**的纯色。这次拿不到输入的像素，没法确认是原图本来就纯色、' +
+          '还是 GPU 没算出来。如果原图不是纯色，就是引擎出了问题；' +
+          '想拿到可靠结论，请把底图改成 PNG 再超分一次。',
+      )
+    }
   }
 
   return { ok: problems.length === 0, problems, advanced, stats, verified: true }
@@ -461,8 +524,21 @@ export async function runUpscale({
   if (!bin) throw new Error('内部错误：没有可用的引擎路径。')
   if (!inputBuffer || inputBuffer.length === 0) throw new Error('没有可超分的图片数据。')
 
-  const inputSize = readPngStats(inputBuffer)
-  if (!inputSize) throw new Error('输入图不是可解析的 8 位 PNG，本地超分只接受 PNG。')
+  // 引擎 png / jpg / webp 都收，宿主就别只认 PNG（踩过：客户端把照片编成 JPEG，
+  // 这里却把人挡在门外，用户看到「输入图不是可解析的 8 位 PNG」一头雾水）。
+  const format = sniffImageFormat(inputBuffer)
+  if (!format) {
+    throw new Error(
+      '输入图既不是 PNG，也不是 JPEG / WebP —— 本地超分引擎认不出这个格式。' +
+        '（后缀不算数，这里按字节判断。）换一张 PNG 或 JPEG 再试。',
+    )
+  }
+  // PNG 能拿到完整的像素统计（纯色校验靠它）；JPEG / WebP 只量得出宽高。
+  const pngStats = format === 'png' ? readPngStats(inputBuffer) : null
+  const inputSize = pngStats ?? sniffImageSize(inputBuffer)
+  if (!inputSize.width || !inputSize.height) {
+    throw new Error('量不出输入图的宽高，文件可能损坏或不完整。换一张图再试。')
+  }
 
   const ratio = Number(scale) > 0 ? Number(scale) : 4
   const outSide = Math.max(inputSize.width, inputSize.height) * ratio
@@ -489,6 +565,8 @@ export async function runUpscale({
       modelsDir,
       inputBuffer,
       inputSize,
+      inputFormat: format,
+      inputStats: pngStats,
       model,
       ratio,
       outSide,
@@ -512,6 +590,8 @@ async function runUpscaleAttempts({
   modelsDir,
   inputBuffer,
   inputSize,
+  inputFormat,
+  inputStats,
   model,
   ratio,
   outSide,
@@ -523,7 +603,9 @@ async function runUpscaleAttempts({
   work,
   warnings,
 }) {
-  const inputPath = path.join(work, `in-${Date.now()}.png`)
+  // 后缀必须跟**真实格式**一致：引擎按内容解，但把它命名成 .png 而内容是 JPEG
+  // 是自找麻烦（有些版本的 stb_image 会先看后缀）。
+  const inputPath = path.join(work, `in-${Date.now()}.${inputFormat || 'png'}`)
   await fsp.writeFile(inputPath, inputBuffer)
 
   // 重试序列：先按配置跑，失败就把 tile 减半（下限 32）。不换模型。
@@ -565,7 +647,8 @@ async function runUpscaleAttempts({
     const verdict = validateUpscale({
       outputBuffer,
       // 判「纯色」要跟输入比：输入本来就没内容（色卡、纯色底），输出没内容是对的。
-      inputStats: inputSize,
+      // 非 PNG 输入时这里是 null（解不了像素），validateUpscale 会如实说明。
+      inputStats,
       scale: ratio,
       inputWidth: inputSize.width,
       inputHeight: inputSize.height,

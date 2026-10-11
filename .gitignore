@@ -29,6 +29,7 @@ tests/.fake-engine-args.log
 tests/.fake-home-*/
 tests/.fake-home-ops/
 tests/.fake-home-hist/
+tests/.junk-*
 
 # ---- 编辑器 ----
 .vscode/

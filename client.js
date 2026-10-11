@@ -869,31 +869,6 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       return { inverted: true, mean }
     }
 
-    /**
-     * 这张图是不是「线稿」。
-     *
-     * 判据：绝大多数像素都挤在两头（接近纯黑或接近纯白）。线稿/施工图就是这样，
-     * 照片/效果图则分布在中间调。判不了就**当线稿**（保守：宁可文件大，也不糊线）。
-     *
-     * 为什么需要：`pickForWash` 把「已出的效果图」当底图时走的是 kind='cad' 那条路，
-     * 于是**一张 2048px 的照片也被编成 PNG**（4~6MB），base64 之后请求体接近 10MB，
-     * 很容易在传输层直接失败（Failed to fetch）—— 用户看到的就是一句莫名其妙的
-     * 「请求失败」。照片按 JPEG 走能小一个量级，而画质对模型来说没有区别。
-     */
-    function looksLikeLineArt(imageData) {
-      const pixels = imageData?.data
-      if (!pixels || !pixels.length) return true
-      let extreme = 0
-      let count = 0
-      // 抽样即可：一张图是不是线稿，看百分之几的像素就够
-      for (let i = 0; i < pixels.length; i += 4 * 7) {
-        const l = pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114
-        if (l < 64 || l > 200) extreme += 1
-        count += 1
-      }
-      return count === 0 ? true : extreme / count >= 0.9
-    }
-
     async function prepareFromDataUrl(original, name, kind, crop, clean) {
       const image = await loadImage(original)
       const rect = crop ?? { x: 0, y: 0, w: 1, h: 1 }
@@ -913,20 +888,17 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         canvas.height = Math.max(1, Math.round(sh * scale))
         const context = canvas.getContext('2d')
         context.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
-        // 先按 CAD 的需要做黑底反相，再判格式 —— 反相后的图才是真正要上传的东西
         if (isCad && clean !== false) cleaned = cleanCadCanvas(canvas).inverted
-        // 线稿用 PNG（JPEG 会把细线糊掉、直接影响结构还原）；照片用 JPEG（小一个量级）
-        let usePng = !isCad
-        if (isCad) {
-          let sample = null
-          try {
-            sample = context.getImageData(0, 0, canvas.width, canvas.height)
-          } catch {
-            sample = null // 取不到像素就当线稿，宁可大也不糊线
-          }
-          usePng = sample ? looksLikeLineArt(sample) : true
-        }
-        submitted = usePng ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.92)
+        // 底图**必须是 PNG**。
+        //
+        // 曾经的教训：为了省请求体积，按「照片用 JPEG / 线稿用 PNG」自动选格式，
+        // 结果底图被编成 JPEG，本地 GPU 超分直接报
+        // 「输入图不是可解析的 8 位 PNG」—— 用户上传的确是 PNG，是**我们在发送前
+        // 改了编码**。那条通道要靠 PNG 解像素来做「有没有内容 / 输出是不是纯色」的
+        // 校验，编成 JPEG 就把这个安全网拆了。宁可文件大一点。
+        //
+        // 参考图是照片，继续用 JPEG 省体积（云端接口都收，本地超分不碰它）。
+        submitted = isCad ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.92)
       }
       const comma = submitted.indexOf(',')
       return {
@@ -4074,7 +4046,8 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         refitCropRect,
         revealFromPointer,
         clipInsetFor,
-        looksLikeLineArt,
+        // 只为了让测试能对它做源码级契约断言（底图必须编 PNG），不给真实调用
+        prepareFromDataUrl,
       },
     }
   },
