@@ -253,6 +253,23 @@ const cadBytes = await fsp.readFile(path.join(here, 'fixtures', 'user-cad-front.
 const cadStats = readPngStats(cadBytes)
 console.log(`底图：${cadStats.width}×${cadStats.height}（亮度 ${cadStats.min}~${cadStats.max}）\n`)
 
+// JPEG 底图（面板把照片编成 JPEG 时会走这条路），放在顶层给多节共用
+const jpgPath = path.join(here, 'fixtures', 'user-ref-wood.jpg')
+const jpegBytes = await fsp.readFile(jpgPath)
+const jpegSizeOf = sniffImageSize(jpegBytes)
+const jpegBlock = {
+  type: 'image',
+  attachment: {
+    attachmentId: 'wood.jpg',
+    mediaType: 'image/jpeg',
+    bytes: jpegBytes.length,
+    width: jpegSizeOf.width,
+    height: jpegSizeOf.height,
+    name: 'wood.jpg',
+    __file: jpgPath,
+  },
+}
+
 // ---------------------------------------------------------------- 1. 没装引擎
 console.log('== 1. 引擎没装时的报错 ==')
 {
@@ -578,21 +595,8 @@ console.log('\n== 4.6 JPEG 底图也能本地超分（曾经只认 PNG，把用�
   // 回归来源：客户端一度把「照片型底图」自动编成 JPEG，而宿主写死「只接受 PNG」，
   // 用户明明上传的是 PNG 却收到「输入图不是可解析的 8 位 PNG」。
   // 现在宿主按字节认格式，png / jpg / webp 都收。
-  const jpgPath = path.join(here, 'fixtures', 'user-ref-wood.jpg')
-  const jpegBytes = await fsp.readFile(jpgPath)
-  const jpegSize = sniffImageSize(jpegBytes)
-  const jpegBlock = {
-    type: 'image',
-    attachment: {
-      attachmentId: 'wood.jpg',
-      mediaType: 'image/jpeg',
-      bytes: jpegBytes.length,
-      width: jpegSize.width,
-      height: jpegSize.height,
-      name: 'wood.jpg',
-      __file: jpgPath,
-    },
-  }
+  const jpegSize = jpegSizeOf
+  const jpegAttachment = jpegBlock
   setMode('ok')
   const result = await call({ taskMode: 'superres', esrganScale: '2', esrganTile: '128' }, [jpegBlock])
   setMode(null)
@@ -625,6 +629,28 @@ console.log('\n== 4.6 JPEG 底图也能本地超分（曾经只认 PNG，把用�
   await fsp.rm(junkPath, { force: true })
   check(!junk.ok, '非图片字节：判失败')
   check(/认不出这个格式/.test(junk.text), `非图片字节：说清是格式认不出（${junk.text.slice(0, 46)}…）`)
+
+  // **关键安全属性**：照片走 JPEG 之后，宿主解不了像素；但面板会把原图的
+  // 亮度范围一起发来（sourceRange）。有了它，纯黑输出必须仍然用**强判据**判失败，
+  // 而不是退化成「没能比对」的弱兜底 —— 否则为了省体积就把安全网拆了。
+  setMode('black')
+  const jpegBlack = await callError(
+    { taskMode: 'superres', esrganScale: '2', esrganTile: '128', sourceRange: { min: 0, max: 255 } },
+    [jpegBlock],
+  )
+  setMode(null)
+  check(!jpegBlack.ok, 'JPEG 底图 + 面板亮度范围：纯黑仍判失败')
+  check(
+    /输入明显有内容/.test(jpegBlack.text),
+    `用的是「输入明显有内容」这条强判据（不是弱兜底）：${jpegBlack.text.slice(0, 52)}…`,
+  )
+
+  // 没带范围时才退化成弱兜底，而且要**如实说明**（不假装有把握）
+  setMode('black')
+  const jpegNoRange = await callError({ taskMode: 'superres', esrganScale: '2', esrganTile: '128' }, [jpegBlock])
+  setMode(null)
+  check(!jpegNoRange.ok, 'JPEG 底图、没带范围：纯黑也判失败（弱兜底仍在）')
+  check(/没能做/.test(jpegNoRange.text) || /没法确认/.test(jpegNoRange.text), '没范围时如实说明「没能比对输入」')
 }
 
 // ---------------------------------------------------------------- 5. 纯黑必须是失败

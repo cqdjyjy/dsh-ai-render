@@ -1856,12 +1856,21 @@ async function runLocalUpscale(ctx, settings, job, invocation) {
   // 全试过，都报 `encode image ... failed`，而且退出码是 0），换到 D: 就正常。
   // 最终那张图本来就要写进出图目录，所以这里一定可写 —— 用它最稳。
   const work = await fsp.mkdtemp(path.join(dir, '.esrgan-'))
+  // 纯色校验要拿「原图有没有内容」作比。图是 PNG 时宿主自己解像素；
+  // 不是 PNG（客户端为省体积把照片编成了 JPEG）时，就用面板随作业发来的
+  // 亮度范围 —— 否则「输出全黑 = GPU 没算出来」那道闸就形同虚设了。
+  const range = job.sourceRange
+  const panelStats =
+    range && Number.isFinite(Number(range.min)) && Number.isFinite(Number(range.max))
+      ? { min: Number(range.min), max: Number(range.max) }
+      : null
   let outcome
   try {
     outcome = await runUpscale({
       bin: located.bin,
       modelsDir: located.modelsDir,
       inputBuffer: source.data,
+      inputStats: panelStats,
       model,
       scale,
       tile,
@@ -2374,7 +2383,10 @@ if (loaded.error) throw new Error(loaded.error)
                       : wantsLocalUpscale(job)
                         ? '本地 GPU 超分失败'
                         : '效果图生成失败'
-        return { kind: 'error', text: `${subject}：${errorMessage(error)}` }
+        // 有些错误（比如 runUpscale 抛的）**自带**一句面向用户的标题，
+        // 再套一层就变成「本地 GPU 超分失败：本地 GPU 超分失败：…」。已经在里面就不重复。
+        const detail = errorMessage(error)
+        return { kind: 'error', text: detail.startsWith(subject) ? detail : `${subject}：${detail}` }
       }
     },
   }

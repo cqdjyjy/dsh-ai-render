@@ -539,6 +539,14 @@ export async function runUpscale({
   if (!inputSize.width || !inputSize.height) {
     throw new Error('量不出输入图的宽高，文件可能损坏或不完整。换一张图再试。')
   }
+  // 非 PNG 时宿主解不了像素，但**面板会随作业把原图的亮度范围发过来**
+  // （它本来就要过一遍画布，顺手就量了）。有了它，「输出一片纯色 = GPU 没算出来」
+  // 那道闸在 JPEG 输入下依然有效 —— 不必为了校验而强迫用户传大 PNG。
+  const effectiveStats =
+    pngStats ??
+    (inputStats && Number.isFinite(Number(inputStats.min)) && Number.isFinite(Number(inputStats.max))
+      ? { min: Number(inputStats.min), max: Number(inputStats.max) }
+      : null)
 
   const ratio = Number(scale) > 0 ? Number(scale) : 4
   const outSide = Math.max(inputSize.width, inputSize.height) * ratio
@@ -566,7 +574,7 @@ export async function runUpscale({
       inputBuffer,
       inputSize,
       inputFormat: format,
-      inputStats: pngStats,
+      inputStats: effectiveStats,
       model,
       ratio,
       outSide,

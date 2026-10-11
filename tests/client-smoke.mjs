@@ -445,14 +445,21 @@ assert(
   '手动点击 / 从历史还原都标记为「已选过」（不被自动挑选顶掉）',
 )
 
-console.log('\n== 上传格式：底图必须是 PNG（本地超分要靠它解像素） ==')
-// 这条是踩坑换来的契约：曾经按「照片用 JPEG」自动选格式，底图被编成 JPEG，
-// 本地 GPU 超分直接报「输入图不是可解析的 8 位 PNG」—— 用户上传的确是 PNG，
-// 是客户端在发送前改了编码。所以这里**用源码级断言把契约钉死**：
-// prepareFromDataUrl 里底图（isCad）必须走 image/png，参考图才走 JPEG。
-const prepareSource = String(icons.prepareFromDataUrl ?? '')
-assert(prepareSource.includes("isCad ? canvas.toDataURL('image/png')"), '底图固定编成 PNG')
-assert(prepareSource.includes("canvas.toDataURL('image/jpeg'"), '参考图仍然走 JPEG 省体积')
+console.log('\n== 上传格式：线稿用 PNG、照片用 JPEG（都要带亮度范围） ==')
+//
+// 这条契约踩过两次，方向是相反的，所以把「为什么」写清楚：
+//
+//  1. 一度按内容自动选格式 → 底图被编成 JPEG，而当时**宿主只认 PNG**，
+//     本地超分直接报「输入图不是可解析的 8 位 PNG」（用户上传的确实是 PNG）。
+//  2. 于是改成底图一律 PNG → 大照片编 PNG 既慢又大：宿主那条 Remote 通道
+//     每 2 秒 ping、漏 2 次就 terminate，页面一卡几秒整条连接就被掐，
+//     之后每个命令都报 Failed to fetch。而「本地超分」正是唯一会传大照片的路径。
+//
+// 现在的解法是**两头一起改**：客户端按内容选格式（照片走 JPEG，又快又小），
+// 并把**原图亮度范围**一起发过去；宿主收 JPEG，用这个范围继续做纯色校验。
+// 所以下面既验格式，也验 sourceRange 必须带上 —— 少了它，安全网就没了。
+//
+// 这些都用**真调用**验证（源码字符串断言挡不住块作用域那类错，见下）。
 
 // ---------------------------------------------------------------- 真的调一遍上传管线
 //
@@ -462,20 +469,29 @@ assert(prepareSource.includes("canvas.toDataURL('image/jpeg'"), '参考图仍然
 // 唯一挡得住的办法就是真的调一次。
 console.log('\n== 上传管线：真的调用 prepareFromDataUrl（挡住块作用域那类错） ==')
 {
-  const seenFormats = []
+  // 画布像素可控：默认全白（= 线稿），可切成中间调（= 照片）
+  let pixelMode = 'lineArt'
   const makeCanvas = () => ({
     width: 0,
     height: 0,
     getContext: () => ({
       drawImage() {},
-      // 全 255 = 白底，cleanCadCanvas 会判定「不用反相」
-      getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }),
+      getImageData: (x, y, w, h) => {
+        const data = new Uint8ClampedArray(Math.max(1, w * h) * 4)
+        for (let i = 0; i < data.length; i += 4) {
+          // 线稿：白底（偶尔黑线）→ 几乎全落在两头
+          // 照片：中间调 → 两头几乎没有
+          const value = pixelMode === 'lineArt' ? 250 : 140
+          data[i] = value
+          data[i + 1] = value
+          data[i + 2] = value
+          data[i + 3] = 255
+        }
+        return { data }
+      },
       putImageData() {},
     }),
-    toDataURL: (type) => {
-      seenFormats.push(type)
-      return `data:${type};base64,QUJD`
-    },
+    toDataURL: (type) => `data:${type};base64,QUJD`,
   })
   globalThis.document = { createElement: (tag) => (tag === 'canvas' ? makeCanvas() : {}) }
   // 一张 4000×3000 的「源图」，用来验证上传尺寸被压到 2048 以内
@@ -491,21 +507,36 @@ console.log('\n== 上传管线：真的调用 prepareFromDataUrl（挡住块作�
     }
   globalThis.Image = makeImage(4000, 3000)
 
-  // (a) 大图 + 底图：要过画布 → 缩到 2048 → PNG
+  // (a) 大图 + 底图 + 线稿内容 → 缩到 2048、编 PNG、带上亮度范围
+  pixelMode = 'lineArt'
   const big = await icons.prepareFromDataUrl('data:image/png;base64,QUJD', 'big.png', 'cad', null, false)
   assert(big.width === 4000 && big.height === 3000, `原始尺寸保留（${big.width}×${big.height}）`)
   assert(
     big.uploadWidth === 2048 && big.uploadHeight === 1536,
     `上传尺寸被压到 2048 以内（${big.uploadWidth}×${big.uploadHeight}）`,
   )
-  assert(big.mediaType === 'image/png', `底图编成 PNG（${big.mediaType}）`)
+  assert(big.mediaType === 'image/png', `线稿底图编成 PNG（${big.mediaType}）`)
   assert(big.data === 'QUJD', 'data 是纯 base64（不含 data URL 前缀）')
+  assert(
+    big.sourceRange && Number.isFinite(big.sourceRange.min) && Number.isFinite(big.sourceRange.max),
+    `线稿也带亮度范围（${JSON.stringify(big.sourceRange)}）`,
+  )
 
-  // (b) 大图 + 参考图：过画布但编 JPEG
+  // (b) **照片底图 → JPEG**：这是「别再让大照片走 PNG」的核心
+  pixelMode = 'photo'
+  const photo = await icons.prepareFromDataUrl('data:image/png;base64,QUJD', 'p.png', 'cad', null, false)
+  assert(photo.mediaType === 'image/jpeg', `照片底图改走 JPEG（${photo.mediaType}）`)
+  assert(
+    photo.sourceRange && photo.sourceRange.max - photo.sourceRange.min <= 2,
+    `照片的亮度范围如实反映「几乎是单色」（${JSON.stringify(photo.sourceRange)}）`,
+  )
+
+  // (c) 大图 + 参考图：过画布、编 JPEG
+  pixelMode = 'photo'
   const ref = await icons.prepareFromDataUrl('data:image/png;base64,QUJD', 'r.png', 'ref', null, false)
   assert(ref.mediaType === 'image/jpeg', `参考图走 JPEG（${ref.mediaType}）`)
 
-  // (c) 小图 + 参考图：**不走画布**这条分支 —— 当初的 canvas 就是在这里越界引用的
+  // (d) 小图 + 参考图：**不走画布**这条分支 —— 当初的 canvas 就是在这里越界引用的
   globalThis.Image = makeImage(120, 90)
   const small = await icons.prepareFromDataUrl('data:image/png;base64,QUJD', 's.png', 'ref', null, false)
   assert(small.uploadWidth === 120 && small.uploadHeight === 90, `不走画布时用原图尺寸（${small.uploadWidth}×${small.uploadHeight}）`)

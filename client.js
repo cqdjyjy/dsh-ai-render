@@ -869,6 +869,56 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       return { inverted: true, mean }
     }
 
+    /**
+     * 读一次画布像素，得出「是不是线稿」和亮度范围。一次 getImageData 就够。
+     *
+     * `lineArt` 决定编码格式：线稿用 PNG（JPEG 会糊细线），照片用 JPEG。
+     * `range` 是**亮度最小/最大值**，会随作业一起发给宿主 ——
+     * 这样即使图被编成 JPEG，宿主仍然能判断「原图本来就有内容」，
+     * 从而保住「输出是一片纯色 = GPU 没算出来」那道闸。
+     */
+    function readCanvasStats(canvas) {
+      const context = canvas.getContext('2d')
+      const { width, height } = canvas
+      if (!width || !height) return null
+      let pixels
+      try {
+        pixels = context.getImageData(0, 0, width, height).data
+      } catch {
+        return null
+      }
+      let min = 255
+      let max = 0
+      let extreme = 0
+      let count = 0
+      // 抽样就够：这张图是线稿还是照片，看百分之几的像素就能判
+      for (let i = 0; i < pixels.length; i += 4 * 7) {
+        const l = pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114
+        if (l < min) min = l
+        if (l > max) max = l
+        if (l < 64 || l > 200) extreme += 1
+        count += 1
+      }
+      if (!count) return null
+      return {
+        min: Math.round(min),
+        max: Math.round(max),
+        lineArt: extreme / count >= 0.9,
+      }
+    }
+
+    /**
+     * 把主线程让出去一拍。
+     *
+     * 为什么必须有：宿主的 Remote 通道走 WebSocket，**每 2 秒 ping 一次、
+     * 漏 2 次就 socket.terminate()**（容忍度约 4 秒）。图片解码 + 画布 +
+     * PNG 编码这几步是同步的，大图上很容易一次卡住好几秒 ——
+     * 一旦被判超时，整条连接被掐，之后**每个命令**都会报
+     * `commands/execute failed: Failed to fetch`，而且刷新前怎么点都没用。
+     * 所以每个重活之间都主动让一拍，让页面有机会把心跳回掉。
+     */
+    const yieldToPage = () => new Promise((resolve) => setTimeout(resolve, 0))
+
     async function prepareFromDataUrl(original, name, kind, crop, clean) {
       const image = await loadImage(original)
       const rect = crop ?? { x: 0, y: 0, w: 1, h: 1 }
@@ -882,6 +932,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       let submitted = original
       let cleaned = false
       let canvasUsed = false
+      let sourceRange = null
       // 画布尺寸存到**外层**变量：canvas 是在下面的 if 块里 const 的，
       // 出了块就没了。曾经在 return 里直接引用 canvas.width → 整个上传抛
       // `canvas is not defined`。
@@ -894,20 +945,21 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         canvas.height = Math.max(1, Math.round(sh * scale))
         const context = canvas.getContext('2d')
         context.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
+        await yieldToPage()
         if (isCad && clean !== false) cleaned = cleanCadCanvas(canvas).inverted
+        await yieldToPage()
+        const stats = readCanvasStats(canvas)
+        if (stats) sourceRange = { min: stats.min, max: stats.max }
+        // 线稿用 PNG（JPEG 会糊线，直接影响结构还原）；
+        // 照片用 JPEG —— 大照片编 PNG 既慢又大，是**卡住主线程 + 撑爆帧**的双重来源。
+        // 宿主那边现在两种都收，并且会用 sourceRange 继续做纯色校验。
+        const usePng = isCad && (!stats || stats.lineArt)
+        await yieldToPage()
+        submitted = usePng ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.92)
+        await yieldToPage()
         canvasUsed = true
         uploadW = canvas.width
         uploadH = canvas.height
-        // 底图**必须是 PNG**。
-        //
-        // 曾经的教训：为了省请求体积，按「照片用 JPEG / 线稿用 PNG」自动选格式，
-        // 结果底图被编成 JPEG，本地 GPU 超分直接报
-        // 「输入图不是可解析的 8 位 PNG」—— 用户上传的确是 PNG，是**我们在发送前
-        // 改了编码**。那条通道要靠 PNG 解像素来做「有没有内容 / 输出是不是纯色」的
-        // 校验，编成 JPEG 就把这个安全网拆了。宁可文件大一点。
-        //
-        // 参考图是照片，继续用 JPEG 省体积（云端接口都收，本地超分不碰它）。
-        submitted = isCad ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.92)
       }
       const comma = submitted.indexOf(',')
       return {
@@ -920,6 +972,9 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         previewUrl: submitted,
         width: sw,
         height: sh,
+        // 原图亮度范围：即使图被编成 JPEG（宿主解不了像素），也能靠它继续做
+        // 「原图本来就有内容 / 输出却是一片纯色 ⇒ GPU 没算出来」的判断。
+        sourceRange,
         // **实际会送出去的**像素尺寸（上面那两个是原始裁切尺寸，可能远大于上传尺寸）。
         // 面板要靠它预估本地超分的输出有多大 —— 默认 ×4 在一张 2K 效果图上就是
         // 6144×4096 / 二十几 MB，跑起来要好几分钟，得让人**在点之前**看见。
@@ -1747,6 +1802,9 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               job.esrganGpu = esrgan.gpu
               job.esrganTta = esrgan.tta ? '1' : '0'
               job.esrganDetail = esrgan.detail
+              // 原图亮度范围：图若被编成 JPEG（宿主解不了像素），靠它继续做
+              // 「原图有内容 / 输出却纯色 ⇒ GPU 没算出来」的判断
+              if (cad?.sourceRange) job.sourceRange = cad.sourceRange
               // 本地超分没有提示词，也没有质检；把云通道那套字段清掉，
               // 免得宿主把它们当成一次云出图（那就会去要 API Key）。
               delete job.plain
