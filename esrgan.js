@@ -775,6 +775,7 @@ export async function probeEsrgan({
       maxSide: 8192,
     })
     const downgraded = configured > 0 && outcome.tile !== configured
+    const side2 = side * 2 // 探针是 ×2 放大
     return {
       ok: true,
       runnable: true,
@@ -783,6 +784,10 @@ export async function probeEsrgan({
       tile: outcome.tile,
       recommendedTile: outcome.tile,
       probeSize: `${side}×${side}`,
+      // 探针产出的像素数与耗时：面板据此算出**本机真实速度**，给用户一个
+      // 基于实测的时间预估（而不是编一个数字）。老卡上这一步很关键 ——
+      // 一张 2K 效果图 ×2 可能要十几分钟。
+      probeOutputPixels: side2 * side2,
       elapsedMs: outcome.elapsedMs,
       reason: '',
       hint: downgraded

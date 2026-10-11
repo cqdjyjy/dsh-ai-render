@@ -1011,6 +1011,25 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       }
     }
 
+    /**
+     * 按**本机实测速度**估个时间。
+     *
+     * 探针是真的算过一张图并记了耗时，所以这里有真实的 px/ms ——
+     * 没跑过探针就返回 null，**不编数字**。
+     *
+     * 为什么这件事重要：这台 K4200 实测约 0.55 百万像素/分钟。一张 1536×1024 的
+     * 效果图 ×2（630 万像素）要 11 分钟以上。不说清楚，用户只会以为卡死了。
+     */
+    function localTimeEstimate(plan, probe) {
+      if (!plan || !probe) return null
+      const pixels = Number(probe.probeOutputPixels) || 0
+      const ms = Number(probe.elapsedMs) || 0
+      if (pixels <= 0 || ms <= 0) return null
+      const totalMs = ((plan.width * plan.height) / pixels) * ms
+      if (!Number.isFinite(totalMs) || totalMs <= 0) return null
+      return { minutes: Math.max(1, Math.round(totalMs / 60000)), ms: totalMs }
+    }
+
     async function prepareFile(file, kind, clean) {
       return prepareFromDataUrl(await readFileAsDataURL(file), file.name, kind, null, clean)
     }
@@ -2568,13 +2587,15 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
           (() => {
             const plan = localOutputPlan(esrgan.scale, cad)
             if (!plan) return null
+            const estimate = localTimeEstimate(plan, engine?.probe)
             return h(
               'div',
               { className: 'cr-note' },
               `预计输出 ${plan.width}×${plan.height}（约 ${plan.megapixels} 百万像素）` +
-                (plan.huge
-                  ? ' —— **很大**：老卡上可能要几分钟，产物也会有几十 MB。嫌慢就把倍数降下来。'
-                  : ''),
+                (estimate
+                  ? ` —— 按本机实测速度约 **${estimate.minutes} 分钟**（本地计算，不花钱，请耐心等）`
+                  : '）想先知道要等多久，点上面的「检测显卡能不能跑」—— 它会实测一张图，据此给出时间预估') +
+                (plan.huge ? '。⚠ 长边超过 4096，很慢、产物也大，嫌慢就把倍数降下来' : ''),
             )
           })(),
 
@@ -4180,6 +4201,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         // 只为了让测试能对它做源码级契约断言（底图必须编 PNG），不给真实调用
         prepareFromDataUrl,
         localOutputPlan,
+        localTimeEstimate,
         callCommand,
         isTransportFailure,
       },

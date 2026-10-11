@@ -152,6 +152,13 @@ autoQc: '1',
   esrganDetail: '0',
   // 下载地址留一个覆盖口：国内直连 GitHub 经常不通，可以填镜像地址。
   esrganDownloadUrl: '',
+  // 本地超分自己的超时（毫秒），默认 30 分钟。
+  //
+  // **不能沿用云通道那个 10 分钟**：本地超分是纯 GPU 计算，实测这台 K4200 大约
+  // 0.55 百万像素/分钟 —— 一张 1536×1024 的效果图 ×2（3072×2048 = 630 万像素）
+  // 就要 11 分钟以上，10 分钟的超时会在它算到一半时把它杀掉。
+  // 本地跑不花钱，等久一点也比白等一场好。
+  esrganTimeoutMs: '1800000',
   outputDir: '',
   maxSide: 2048,
   // 异步任务要排。轮询，默认给。10 分钟
@@ -190,6 +197,7 @@ const SETTABLE = [
   'esrganTta',
   'esrganDetail',
   'esrganDownloadUrl',
+  'esrganTimeoutMs',
   'outputDir',
 ]
 
@@ -1771,6 +1779,12 @@ async function localUpscaleStatus(ctx, settings, { probe = false, cwd = '', outD
     gpu: esrganOption(settings, {}, 'esrganGpu', ''),
     tta: String(esrganOption(settings, {}, 'esrganTta', '0')) === '1',
     detail: esrganDetailOf(settings, {}),
+    timeoutMs:
+      Number(settings.esrganTimeoutMs) > 0
+        ? Number(settings.esrganTimeoutMs)
+        : Number(settings.timeoutMs) > 0
+          ? Number(settings.timeoutMs)
+          : 1800000,
     toneLevels: TONE_LEVELS.map(({ id, label, hint }) => ({ id, label, hint })),
     limits: ESRGAN_LIMITS,
   }
@@ -1845,7 +1859,16 @@ async function runLocalUpscale(ctx, settings, job, invocation) {
   const tile = esrganTileOf(settings, job)
   const gpu = esrganOption(settings, job, 'esrganGpu', '')
   const tta = String(esrganOption(settings, job, 'esrganTta', '0')) === '1'
-  const timeoutMs = Number(settings.timeoutMs) > 0 ? Number(settings.timeoutMs) : 600000
+  // 本地超分用自己的超时，**默认 30 分钟**，不沿用云通道的 10 分钟：
+  // 本地是纯 GPU 计算，这台 K4200 实测约 0.55 百万像素/分钟，
+  // 1536×1024 ×2（630 万像素）就要 11 分钟以上 —— 10 分钟会在算到一半时把它杀掉。
+  // 本地不花钱，等久点也比白等一场好。
+  const timeoutMs =
+    Number(settings.esrganTimeoutMs) > 0
+      ? Number(settings.esrganTimeoutMs)
+      : Number(settings.timeoutMs) > 0
+        ? Number(settings.timeoutMs)
+        : 1800000
 
   const dir = resolveOutputDir(settings, job.outDir, cwd)
   await fsp.mkdir(dir, { recursive: true })

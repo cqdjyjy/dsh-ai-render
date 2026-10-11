@@ -558,6 +558,20 @@ console.log('\n== 本地超分的输出预估（面板要在点之前说清后�
   assert(icons.localOutputPlan('4', null) === null, '没有底图时返回 null（不崩）')
   assert(icons.localOutputPlan('', { uploadWidth: 10, uploadHeight: 10 }) === null, '倍数为空时返回 null（不崩）')
   assert(icons.localOutputPlan('4', {}) === null, '底图缺尺寸时返回 null（不崩）')
+
+  // 时间预估必须基于**探针实测**，没跑过探针就一个数字都不许编
+  console.log('  -- 时间预估（只认真实测过的速度）--')
+  // 探针：128×128 ×2 = 256×256 = 65536 像素，用了 10000ms
+  //  → 6.55 px/ms。×2 一张 1536×1024（630 万像素）≈ 961 秒 ≈ 16 分钟
+  const probe = { probeOutputPixels: 256 * 256, elapsedMs: 10000 }
+  const est = icons.localTimeEstimate({ width: 3072, height: 2048 }, probe)
+  assert(est.minutes === 16, `按实测速度算出 16 分钟（得到 ${est?.minutes}）`)
+  assert(icons.localTimeEstimate({ width: 3072, height: 2048 }, null) === null, '没跑过探针就不估（不编数字）')
+  assert(icons.localTimeEstimate({ width: 3072, height: 2048 }, {}) === null, '探针缺数据时不估')
+  assert(
+    icons.localTimeEstimate({ width: 100, height: 100 }, { probeOutputPixels: 65536, elapsedMs: 10000 }).minutes === 1,
+    '极小的图至少报 1 分钟（不说 0 分钟）',
+  )
 }
 
 console.log('\n== 传输层抖动要自动重试一次（宿主重启不该让你白点一次） ==')
