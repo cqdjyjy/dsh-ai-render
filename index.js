@@ -618,6 +618,9 @@ const diagram = typeof job.diagram === 'string' ? job.diagram.trim() : ''
     qcFix: job.qcFix,
     plain: job.plain,
     extra: job.promptExtra,
+    // 「光影重塑 / 换日光」这类一键操作明确要求改光；不告诉组装器的话，
+    // 沿用底图的模式（洗图/换视角/照片）会额外补一句「不是重新打光」把它的意思顶掉。
+    lightingChange: job.lightingChange === true,
     // 画布比例与底图比例：不一致时提示词会额外加一段「不许为了填满画布而重排结构」
     canvasAr: sizing.canvasAr,
     baseAr: sizing.baseAr,
@@ -1566,6 +1569,10 @@ function presetsCatalog() {
       // 面板据此决定显示哪些控件：彩平图不该有光。构图选择器。
 ui: uiOf(id),
       styleFixed: styleIsFixedToBase(id),
+      // 这个操作的布光默认「沿用图1」（洗图/换视角/照片优化/本地超分）。
+      // 面板在切到这类操作时把「光影」重置为「跟随风格」，避免上一次留下的
+      // 选择悄悄改了光 —— 想改光应该由用户在切换之后自己显式选。
+      inheritsLighting: modeInheritsStyle(id),
     })),
     diagrams: DIAGRAM_TYPES.map(({ id, label, hint }) => ({ id, label, hint })),
     quickActions: QUICK_ACTIONS.map(({ id, label, hint, group, needsReference }) => ({
@@ -1682,6 +1689,11 @@ function subprocessResolver(ctx) {
  */
 function wantsLocalUpscale(job) {
   if (!job) return false
+  // 带修改指令 = 用户点的是「改这张」/ 一键操作（比如「光影重塑」），要的是
+  // **重新画一遍**。本地超分只放大、不重画，接不了这个活 —— 让它接就是
+  // 「点了没生效」：图重新放大了一遍，用户要的改动一个字都没落地。
+  // 所以这里必须让路，把请求交给云 AI 通道。
+  if (typeof job.instruction === 'string' && job.instruction.trim()) return false
   if (job.action === 'superres' || job.taskMode === 'superres') return true
   if (job.localUpscale === true) return true
   if (job.taskMode === 'wash' && String(job.washBackend ?? '').trim() === 'local') return true

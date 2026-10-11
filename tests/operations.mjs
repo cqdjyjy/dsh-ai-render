@@ -15,6 +15,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { promises as fsp } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { QUICK_ACTIONS } from '../presets.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
@@ -170,7 +171,14 @@ console.log('== 1. 目录暴露 ==')
 const catalog = await call({ action: 'presets' })
 check(catalog.taskModes.length === 13, `操作 13 个（实为 ${catalog.taskModes.length}）`)
 check(catalog.diagrams.length === 5, `分析图类型 5 个（实为 ${catalog.diagrams.length}）`)
-check(catalog.quickActions.length === 8, `一键操作 8 个（实为 ${catalog.quickActions.length}）`)
+check(catalog.quickActions.length === 9, `一键操作 9 个（实为 ${catalog.quickActions.length}）`)
+// 「光影重塑」与「洗图」是相反的两件事，必须同时在：
+//   洗图 = 别动我的光；光影重塑 = 把光重新打一遍，但要更优秀
+// （instruction 的措辞断言在 prompt-presets.mjs —— 面板目录不下发 instruction）
+const relight = catalog.quickActions.find((action) => action.id === 'light-relight')
+check(Boolean(relight), '一键操作里有「光影重塑」')
+check(relight?.group === '光影', '光影重塑归在「光影」组')
+check(/重新设计|重塑/.test(relight?.hint ?? ''), `光影重塑的说明点明是重新打光：${relight?.hint}`)
 check(
   catalog.taskModes.find((mode) => mode.id === 'text2img')?.noBase === true,
   '文生图标记为「不需要底图」',
@@ -683,6 +691,31 @@ check(refineCreate?.text.includes('【本次改动】'), '一键操作进入迭�
 check(refineCreate?.text.includes('夜间氛围'), '改动内容进了提示词')
 check(refineCreate?.text.includes('除下面点名的改动之外'), '改图模式仍带「只改这一处」的结构锁死')
 check(refineJob.files?.length === 1, '一键操作产出了一张新图')
+
+// 「光影重塑」必须真的把「放开光影 + 锁死其余」两头送进提示词。
+// 这是不花钱能验到的最深处：真调一次云 AI 要计费，而提示词里少一头，
+// 结果就是「要么不敢动光、要么顺手把结构也重画了」。
+console.log('\n== 6.5 光影重塑的提示词真的下发到接口 ==')
+seen.length = 0
+// 直接取 presets.js 里的真文案（单一数据源），别在测试里抄一份 —— 抄了就会漂
+const relightAction = QUICK_ACTIONS.find((action) => action.id === 'light-relight')
+const relightJob = await call(
+  {
+    taskMode: 'elevation',
+    stylePreset: 'cream',
+    instruction: relightAction.instruction,
+    refineFrom: elevJob.files[0].path,
+    count: 1,
+  },
+  [cadBlock],
+)
+const relightCreate = seen.find((entry) => entry.path.includes('/images/') && entry.path.endsWith('/async'))
+check(Boolean(relightAction), '目录里有「光影重塑」')
+check(relightCreate?.text.includes('【本次改动】'), '光影重塑走「改这张」通道（带【本次改动】）')
+check(relightCreate?.text.includes('重新设计'), '「重新设计光影」进了提示词（放开这头）')
+check(relightCreate?.text.includes('除光影以外一律不动'), '「除光影以外一律不动」也进了提示词（锁死那头）')
+check(/不要平光/.test(relightCreate?.text ?? ''), '「更优秀」的判据也进了提示词')
+check(relightJob.files?.length === 1, '光影重塑产出了一张新图')
 
 console.log(`\n${failures === 0 ? 'OPERATIONS TEST PASSED' : `OPERATIONS TEST FAILED (${failures})`}`)
 server.close()

@@ -565,6 +565,20 @@ window.__ModuleLoader__.load({
           key,
         )
       }
+      if (item?.id === 'relight') {
+        // 「AI 重塑光影」不是某个固定光位，所以画「一束光被重新安排」的意思：
+        // 一个主光 + 一道柔和的辅光 + 被重新定方向的光锥，与另外四个明显不同。
+        return bigSvg(
+          [
+            h('rect', { key: 'bg', x: 4, y: 4, width: 48, height: 33, rx: 2, fill: '#2a2f38' }),
+            h('circle', { key: 'key', cx: 16, cy: 12, r: 5, fill: glow }),
+            h('path', { key: 'cone', d: 'M16 16 L 6 36 L 30 36 Z', fill: glow, opacity: 0.35 }),
+            h('rect', { key: 'obj', x: 30, y: 20, width: 14, height: 15, rx: 2, fill: '#c9cfd8' }),
+            h('path', { key: 'fill', d: 'M48 10 L 40 36', stroke: cool, 'stroke-width': 2, fill: 'none', opacity: 0.8 }),
+          ],
+          key,
+        )
+      }
       // 跟随风格（默认）：一半暖一半冷的色轮
       return bigSvg(
         [
@@ -1510,6 +1524,10 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         if (allowed.length > 0 && !allowed.some((item) => styleIds.includes(item.id))) {
           setStyleIds([allowed[0].id])
         }
+        // 切到「布光沿用底图」的操作时把光影重置为「跟随风格」。
+        // 不重置的话，上一次留下的「黄昏暖光」会在洗图里悄悄把光换掉 ——
+        // 现在显式选择是会覆盖「沿用底图」的，所以绝不能让它从上一屏残留下来。
+        if (operations.find((item) => item.id === nextMode)?.inheritsLighting) setLighting('auto')
       }
 
       /**
@@ -1559,6 +1577,13 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
           return
         }
         const refining = Boolean(activeRefineFrom)
+        // 关键：**带修改指令时必须走云 AI**。
+        //
+        // 「光影重塑」「换日光」这类一键操作走的是「改这张」通道，要的是重新画一遍；
+        // 而本地超分只放大、不重画。以前这里只看 localMode，于是「本地超分」下点
+        // 一键操作会被本地分支吞掉 —— 图重新放大了一遍，用户要的改动一个字没落地，
+        // 就是最典型的「点了没生效」。宿主侧 wantsLocalUpscale() 也加了同样的护栏。
+        const localRun = localMode && !refining
         if (refining && !activeInstruction.trim()) {
           setError('迭代改图需要先写一句「想改什么」。')
           return
@@ -1566,13 +1591,13 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         // 参考图是可选的：选了风格预设（非「跟随参考图」）就能出图。
         const chosenStyle = styleIds[0] ?? ''
         // 本地超分不需要风格、也不需要参考图：它不改画面内容，只把分辨率提上去。
-        if (!localMode && !refining && needBase && refs.length === 0 && (!chosenStyle || chosenStyle === 'custom')) {
+        if (!localRun && !refining && needBase && refs.length === 0 && (!chosenStyle || chosenStyle === 'custom')) {
           setError('当前是「跟随参考图」或没选风格，请再上传 1 张参考图，或改选一个风格预设。')
           return
         }
         // 多选风格 = 多方案：逐个出图（异步接口一个任务只出一张）。
         // 本地超分没有「多方案」这回事（输入输出一一对应），固定跑一次。
-        const stylesToRun = localMode
+        const stylesToRun = localRun
           ? ['as-is']
           : refining
             ? [styleIds[0] ?? 'modern']
@@ -1597,11 +1622,11 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
           const collected = []
           const notes = []
           for (const [index, styleId] of stylesToRun.entries()) {
-            const styleLabel = localMode
+            const styleLabel = localRun
               ? '本地超分'
               : catalog?.styles?.find((item) => item.id === styleId)?.label ?? styleId
             setNote(
-              localMode
+              localRun
                 ? `正在用本机 GPU 超分（${esrgan.model} × ${esrgan.scale}）…显卡跑超分可能几十秒到几分钟，请稍等。`
                 : stylesToRun.length > 1
                   ? `正在出第 ${index + 1}/${stylesToRun.length} 张（${styleLabel}），通常 40~90 秒…`
@@ -1627,7 +1652,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               autoQc,
             }
             // 本地超分：把后端与引擎参数一起下发。宿主看到这些就绕开所有云通道。
-            if (localMode) {
+            if (localRun) {
               job.washBackend = 'local'
               job.esrganModel = esrgan.model
               job.esrganScale = esrgan.scale
@@ -1646,9 +1671,12 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
             if (refining) {
               job.instruction = activeInstruction
               job.refineFrom = activeRefineFrom
+              // 「光影」组的一键操作：告诉宿主这次是**明确要改光**，
+              // 让「沿用底图布光」的规则让路（否则提示词自相矛盾，点了没反应）
+              if (override?.lightingChange === true) job.lightingChange = true
             }
             setStages(
-              localMode
+              localRun
                 ? [
                     { label: `本地 GPU 超分 × ${esrgan.scale}`, state: 'active' },
                     { label: '校验输出（防止拿到废图）', state: 'idle' },
@@ -1664,7 +1692,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
             const payload = await callCommand(ctx, sessionId, job, attachments)
             if (runTokenRef.current !== token) return
             setStages(
-              localMode
+              localRun
                 ? [
                     { label: `本地 GPU 超分 × ${esrgan.scale}`, state: 'done' },
                     {
@@ -1726,7 +1754,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
             const modeLabel = payload.modeUsed
               ? ` · ${OPENAI_MODES.find((item) => item.id === payload.modeUsed)?.label ?? payload.modeUsed}`
               : ''
-            if (localMode) {
+            if (localRun) {
               const info = payload.local ?? {}
               notes.push(
                 `本地超分（本机 GPU，未联网未花钱）：${payload.model} × ${info.scale ?? esrgan.scale}` +
@@ -1795,14 +1823,24 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       ])
 
       /**
-       * 结果上的一键操作（换光/换氛围/换材质/换视角/清杂物）。
+       * 结果上的一键操作（光影重塑/换光/换氛围/换材质/换视角/清杂物）。
        * 直接把「改这张 + 指令」带进 run，不必让用户先填表单。
+       *
+       * 「光影」组的操作要额外置 `lightingChange`：宿主据此让「沿用底图布光」
+       * 那条规则让路。不置的话，在洗图 / 换视角 / 照片这类「沿用底图」的操作下，
+       * 提示词会同时出现「把光重新设计一遍」和「不是重新打光」—— 模型听后者，
+       * 于是用户点了「光影重塑」却什么都没发生。判断依据是**操作分组**，
+       * 不是去猜指令文本里有没有「光」字。
        */
       function runQuick(action, item) {
         if (!item?.path || !action?.instruction) return
         setRefineFrom(item.path)
         setInstruction(action.instruction)
-        run({ refineFrom: item.path, instruction: action.instruction })
+        run({
+          refineFrom: item.path,
+          instruction: action.instruction,
+          lightingChange: action.group === '光影',
+        })
       }
 
       /**
@@ -2497,7 +2535,8 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
           h(
             'div',
             { className: 'cr-note' },
-            '本地超分只提「分辨率与锐度」，不会重画内容 —— 想补细节、去伪影、换材质，请把洗图方式切回「云 AI 重绘」。',
+            '本地超分只提「分辨率与锐度」，不会重画内容 —— 想补细节、去伪影、换材质，请把洗图方式切回「云 AI 重绘」。' +
+              '结果卡片上的「光影重塑 / 换日光」等一键操作也走云 AI 重画（本地超分接不了这个活），点它会自动切过去。',
           ),
         )
       }

@@ -611,6 +611,21 @@ console.log('\n== 8.「洗图」后端切换：本地 / 云 ==')
 
   const missing = await callError({ taskMode: 'superres' }, [])
   check(!missing.ok && /需要一张图/.test(missing.text), '没有图时提示要导入底图')
+
+  // **带修改指令时绝不能被本地分支吞掉。**
+  //
+  // 结果卡上的「光影重塑 / 换日光」走的是「改这张」通道，要的是**重新画一遍**；
+  // 本地超分只放大、不重画。以前宿主只看 taskMode，于是这些一键操作会被本地
+  // 分支接走：图重新放大一遍，用户要的改动一个字没落地 —— 最典型的「点了没生效」。
+  const withInstruction = await callError(
+    { taskMode: 'superres', taskMode2: '', instruction: '把这张图的光影重新设计一遍' },
+    [cadBlock],
+  )
+  check(!withInstruction.ok, '带修改指令时不走本地超分')
+  check(
+    /API Key/.test(withInstruction.text),
+    `带修改指令时交给云通道（所以会要 Key）：${withInstruction.text.slice(0, 50)}…`,
+  )
 }
 
 // ---------------------------------------------------------------- 9. 一键下载安装

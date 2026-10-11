@@ -268,6 +268,29 @@ const DIAGRAM_TYPES = [
  */
 const QUICK_ACTIONS = [
   {
+    // 光影重塑：与「洗图」正好相反的一次操作。
+    //
+    // 洗图的要求是「只提画质、布光一律不动」；这里的要求是**把光重新设计一遍、
+    // 追求更优秀的成像**。两者都需要，别把它们混成一个：
+    //   - 洗图：定稿了，别动我的光
+    //   - 光影重塑：这张的光不行，重新打一遍
+    //
+    // 所以这段 instruction 必须两头都说死：**光影部分明确放开**（否则模型不敢动光），
+    // **光影之外一律锁死**（否则它会顺手把结构、材质、机位也重画一遍）。
+    id: 'light-relight',
+    label: '光影重塑',
+    hint: '把光重新设计一遍，追求更优秀的光影层次（云 AI 重画）',
+    instruction:
+      '把这张图的光影**重新设计一遍**，目标是更优秀、更高级的光影效果。' +
+      '光影部分可以大胆改：光源的方向与数量、主光与辅光的强弱关系、色温冷暖、整体明暗对比、' +
+      '阴影的软硬与投射方向、高光的位置与形状、暗部保留的细节、环境反射与氛围色。' +
+      '判断标准：光要有明确的方向与来源，主体有清晰的高光落点与明暗过渡，暗部透气而不死黑，' +
+      '画面有体积感与空间纵深；不要平光、不要四角一样亮、不要灰蒙蒙没有重点。' +
+      '**但除光影以外一律不动**：构图与视角、主体轮廓与长宽比例、分格结构、构件与五金的数量与位置、' +
+      '材质的种类与颜色、画面中的文字与水印，全部保持原样，不得重新设计。',
+    group: '光影',
+  },
+  {
     id: 'light-day',
     label: '换日光',
     hint: '改成明亮自然日光',
@@ -844,6 +867,18 @@ function stylesOf(taskModeId) {
 const LIGHTING_PRESETS = [
   { id: 'auto', label: '跟随风格', hint: '用风格预设自带的光影描述', prompt: '' },
   {
+    // 与上面四个「指定光位」的预设不同：这一个把打光的决定权交给模型，
+    // 目标从「照这个光位打」变成「打到最好看」。适合出图时就想要最好的光，
+    // 而不是先猜一个光位再返工。
+    id: 'relight',
+    label: 'AI 重塑光影',
+    hint: '由模型重新打光，追求更高级的光影层次（不是换某个固定光位）',
+    prompt:
+      '光影由你重新设计，追求更优秀的效果：光源方向明确、主辅光层次分明、明暗对比有张力、' +
+      '高光有落点、暗部透气有细节、材质的光泽与环境反射真实，画面要有体积感与空间纵深。' +
+      '避免平光、避免四角同亮、避免灰蒙蒙没有重点。',
+  },
+  {
     id: 'daylight',
     label: '自然日光',
     hint: '明亮通透，靠窗侧光',
@@ -1315,6 +1350,12 @@ function composePrompt(options = {}) {
   const mode = resolveTaskMode(options.taskMode)
   const style = resolveStyle(options.stylePreset)
   const lighting = resolveLighting(options.lighting)
+  // 「显式选了光影预设」= 选了具体某个光位/重塑，而不是默认的「跟随风格」。
+  // resolveLighting 对 auto 返回 undefined，所以有值就是显式选的。
+  const explicitLighting = Boolean(lighting)
+  // 光影要不要「沿用图1」。必须声明在函数作用域：既要给中段的【光影】段用，
+  // 也要给末尾的【光影复述】段用，而后者在那个 if 块外面。
+  const inheritsLight = modeInheritsStyle(mode.id) && !options.lightingChange && !explicitLighting
   const referenceCount = Number(options.referenceCount) || 0
   // 无底图的模式（文生图）里，第一张图就是参考图1，编号整体前移一位。
   const baseOffset = mode.noBase ? 0 : 1
@@ -1552,18 +1593,28 @@ function composePrompt(options = {}) {
         short: '材质色彩完全沿用图1，不要换风格。',
       })
     }
+    // 光影这一段的「沿用图1」规则什么时候该让路：
+    //
+    // 洗图 / 换视角 / 照片优化默认必须沿用图1的布光，否则就不是同一个画面了。
+    // 但有两种情况用户是**明确要求改光**的，此时那条规则必须让路，否则就是
+    // 「填了没生效」：
+    //   1. 点了「光影重塑 / 换日光 / 换黄昏 / 换夜景 / 影棚光」这类一键操作
+    //      → 面板会置 lightingChange（由操作分组决定，不做字符串猜谜）
+    //   2. 显式选了某个光影预设（不是「跟随风格」）
+    //      → 以前显式选了也会被「必须与图1一致」压掉，等于白选
+    //
+    // 反过来说：**整图重画**（没有本次改动）时这条规则照旧生效 ——
+    // 那正是洗图「只提画质、别动我的光」的实现。
+    // （inheritsLight 在函数开头算好，末尾的【光影复述】也要用同一个判断）
     segments.push({
       name: '【光影】',
       priority: 50,
       // 防御：任何一个风格预设漏了 light 字段，都必须回落到默认描述。
       // 否则会把字面量 "undefined" 拼进提示词发给模型（踩过一次）。
-      //
-      // 沿用底图材质的模式（换视角 / 照片优化 / 洗图）：光影也必须沿用图1 ——
-      // 否则洗图会把原图的光换掉（比如硬塞一套暖光 3000K），那就不是洗图了。
-      text: modeInheritsStyle(mode.id)
+      text: inheritsLight
         ? '**光照必须与图1完全一致，不要重新打光。**逐项对齐：光源的方向与数量、主光与辅光的强弱关系、色温冷暖、整体明暗与对比度、阴影的软硬与投射方向、高光的位置与强度、暗部保留的细节、环境反射与氛围色。只允许让光影更干净、更细腻、层次更清楚，不允许改变它的性质。'
         : (lighting ? lighting.prompt : style ? style.light : '') || '柔和自然的室内灯光，真实阴影与反射。',
-      short: modeInheritsStyle(mode.id)
+      short: inheritsLight
         ? '光照必须与图1完全一致，不要重新打光；只让光影更干净细腻。'
         : '柔和自然的室内灯光，真实阴影与反射。',
     })
@@ -1585,7 +1636,7 @@ function composePrompt(options = {}) {
   // 容易翻车的地方就是**顺手把光重打一遍** —— 它会本能地把画面调得更暖、更亮、
   // 更"好看"，于是原图的布光被换掉。中段的【光影】段在这种长提示词里最容易被
   // 忽略，所以按近因效应在末尾重述一次，并把要核对的项目逐条列出来。
-  if (modeInheritsStyle(resolveTaskMode(options.taskMode).id)) {
+  if (inheritsLight) {
     segments.push({
       name: '【光影复述（务必遵守）】',
       priority: 96,

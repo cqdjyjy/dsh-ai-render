@@ -15,6 +15,7 @@ import {
   STYLE_PRESETS,
   STYLE_SWATCHES,
   LIGHTING_PRESETS,
+  QUICK_ACTIONS,
   CAMERA_PRESETS,
   CAMERA_AZIMUTH,
   CAMERA_ELEVATION,
@@ -49,7 +50,78 @@ const SECTION_ORDER = ['【结构锁死】', '【视角构图】', '【材质色
 console.log('\n== 1. 目录完整性 ==')
 check(TASK_MODES.length === 13, `操作 13 个（实为 ${TASK_MODES.length}）`)
 check(STYLE_PRESETS.length === 30, `风格预设 30 个（实为 ${STYLE_PRESETS.length}）`)
-check(LIGHTING_PRESETS.length === 5, `光影预设 5 个（实为 ${LIGHTING_PRESETS.length}）`)
+check(LIGHTING_PRESETS.length === 6, `光影预设 6 个（实为 ${LIGHTING_PRESETS.length}）`)
+
+// 「光影重塑」与「洗图」是相反的两件事，措辞不能互相污染：
+//   洗图 = 别动我的光（【光影】段明令禁止重新打光）
+//   光影重塑 = 把光重新打一遍，但要更优秀
+// 这一条必须同时检查「放开光影」和「锁死其余」两头 —— 只写放开，模型会顺手
+// 把结构、材质、机位也重画一遍；只写锁死，它就不敢动光，等于没做。
+console.log('\n== 光影重塑（一键操作 + 光影预设）==')
+const relight = QUICK_ACTIONS.find((action) => action.id === 'light-relight')
+check(Boolean(relight), '有「光影重塑」一键操作')
+check(/重新设计/.test(relight?.instruction ?? ''), '明确要求「重新设计」光影（不是保持不变）')
+check(
+  /除光影以外一律不动/.test(relight?.instruction ?? ''),
+  '同时锁死光影之外的一切（结构 / 材质 / 机位 / 文字不许改）',
+)
+check(/不要平光/.test(relight?.instruction ?? ''), '给出了「更优秀」的判据（不要平光、要有纵深）')
+const lightingRelight = LIGHTING_PRESETS.find((item) => item.id === 'relight')
+check(Boolean(lightingRelight), '有「AI 重塑光影」光影预设')
+check(/由你重新设计/.test(lightingRelight?.prompt ?? ''), '预设把打光决定权交给模型')
+
+// 提示词里绝不能同时出现「重新打光」和「不是重新打光」——
+// 这一条踩过：洗图/换视角/照片优化/本地超分默认要「沿用图1布光」，会额外补一段
+// 【光影复述（务必遵守）】「不是重新打光」（priority 96，靠末尾、模型最听它）。
+// 于是用户点「光影重塑」时，提示词自相矛盾，模型听后者 → 点了没反应。
+console.log('\n== 光影重塑不能和「不是重新打光」同时出现 ==')
+const relightInstruction = relight?.instruction ?? ''
+for (const mode of ['wash', 'view-switch', 'photo', 'superres']) {
+  // (a) 一键操作改光：必须放开
+  const changed = composePrompt({
+    taskMode: mode,
+    stylePreset: 'cream',
+    lighting: 'auto',
+    referenceCount: 0,
+    instruction: relightInstruction,
+    lightingChange: true,
+  })
+  check(
+    changed.includes('重新设计') && !changed.includes('不是重新打光'),
+    `${mode} + 光影重塑：放开光影、撤掉「不是重新打光」`,
+  )
+  // (b) 整图重画（没有本次改动）：洗图的约束必须还在
+  const plain = composePrompt({ taskMode: mode, stylePreset: 'cream', lighting: 'auto', referenceCount: 0 })
+  check(
+    plain.includes('不要重新打光'),
+    `${mode} 整图重画：仍然禁止重新打光（洗图的立身之本没被改掉）`,
+  )
+  // (c) 显式选了某个光影预设：选择必须赢过「沿用底图」，否则就是填了没生效
+  const explicit = composePrompt({
+    taskMode: mode,
+    stylePreset: 'cream',
+    lighting: 'studio',
+    referenceCount: 0,
+  })
+  check(
+    explicit.includes('影棚式布光') && !explicit.includes('不是重新打光'),
+    `${mode} + 显式选「影棚光」：用户的选择生效，不再被「沿用图1」压掉`,
+  )
+}
+// 光影组的四个固定光位也一样（它们本来就该改光）
+const dayAction = QUICK_ACTIONS.find((action) => action.id === 'light-day')
+const dayChanged = composePrompt({
+  taskMode: 'wash',
+  stylePreset: 'cream',
+  lighting: 'auto',
+  referenceCount: 0,
+  instruction: dayAction.instruction,
+  lightingChange: true,
+})
+check(
+  dayChanged.includes('明亮的自然日光') && !dayChanged.includes('不是重新打光'),
+  '洗图 + 换日光：不再自相矛盾（这是本次顺带修掉的老问题）',
+)
 check(
   new Set(STYLE_PRESETS.map((style) => style.id)).size === STYLE_PRESETS.length,
   '风格 id 无重复',
