@@ -454,6 +454,81 @@ const prepareSource = String(icons.prepareFromDataUrl ?? '')
 assert(prepareSource.includes("isCad ? canvas.toDataURL('image/png')"), '底图固定编成 PNG')
 assert(prepareSource.includes("canvas.toDataURL('image/jpeg'"), '参考图仍然走 JPEG 省体积')
 
+// ---------------------------------------------------------------- 真的调一遍上传管线
+//
+// 为什么要搭个假 DOM 真跑：`node --check` 只看语法，源码级断言只看字符串 ——
+// 两次「块作用域里 const 的东西拿到块外引用」（canvas is not defined、
+// inheritsLight is not defined）**都是从这两道关底下溜过去、到用户手里才炸的**。
+// 唯一挡得住的办法就是真的调一次。
+console.log('\n== 上传管线：真的调用 prepareFromDataUrl（挡住块作用域那类错） ==')
+{
+  const seenFormats = []
+  const makeCanvas = () => ({
+    width: 0,
+    height: 0,
+    getContext: () => ({
+      drawImage() {},
+      // 全 255 = 白底，cleanCadCanvas 会判定「不用反相」
+      getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(w * h * 4).fill(255) }),
+      putImageData() {},
+    }),
+    toDataURL: (type) => {
+      seenFormats.push(type)
+      return `data:${type};base64,QUJD`
+    },
+  })
+  globalThis.document = { createElement: (tag) => (tag === 'canvas' ? makeCanvas() : {}) }
+  // 一张 4000×3000 的「源图」，用来验证上传尺寸被压到 2048 以内
+  const makeImage = (w, h) =>
+    class {
+      constructor() {
+        this.naturalWidth = w
+        this.naturalHeight = h
+      }
+      set src(value) {
+        queueMicrotask(() => this.onload?.())
+      }
+    }
+  globalThis.Image = makeImage(4000, 3000)
+
+  // (a) 大图 + 底图：要过画布 → 缩到 2048 → PNG
+  const big = await icons.prepareFromDataUrl('data:image/png;base64,QUJD', 'big.png', 'cad', null, false)
+  assert(big.width === 4000 && big.height === 3000, `原始尺寸保留（${big.width}×${big.height}）`)
+  assert(
+    big.uploadWidth === 2048 && big.uploadHeight === 1536,
+    `上传尺寸被压到 2048 以内（${big.uploadWidth}×${big.uploadHeight}）`,
+  )
+  assert(big.mediaType === 'image/png', `底图编成 PNG（${big.mediaType}）`)
+  assert(big.data === 'QUJD', 'data 是纯 base64（不含 data URL 前缀）')
+
+  // (b) 大图 + 参考图：过画布但编 JPEG
+  const ref = await icons.prepareFromDataUrl('data:image/png;base64,QUJD', 'r.png', 'ref', null, false)
+  assert(ref.mediaType === 'image/jpeg', `参考图走 JPEG（${ref.mediaType}）`)
+
+  // (c) 小图 + 参考图：**不走画布**这条分支 —— 当初的 canvas 就是在这里越界引用的
+  globalThis.Image = makeImage(120, 90)
+  const small = await icons.prepareFromDataUrl('data:image/png;base64,QUJD', 's.png', 'ref', null, false)
+  assert(small.uploadWidth === 120 && small.uploadHeight === 90, `不走画布时用原图尺寸（${small.uploadWidth}×${small.uploadHeight}）`)
+  assert(small.mediaType === 'image/png', '不走画布时保持原格式')
+
+  // (d) 带裁切框：也要能跑通（另一条走画布的入口）
+  const cropped = await icons.prepareFromDataUrl('data:image/png;base64,QUJD', 'c.png', 'ref', { x: 0.25, y: 0.25, w: 0.5, h: 0.5 }, false)
+  assert(cropped.uploadWidth > 0 && cropped.uploadHeight > 0, `裁切后也有上传尺寸（${cropped.uploadWidth}×${cropped.uploadHeight}）`)
+}
+
+console.log('\n== 本地超分的输出预估（面板要在点之前说清后果） ==')
+{
+  const plan = icons.localOutputPlan('4', { uploadWidth: 1536, uploadHeight: 1024 })
+  assert(plan.width === 6144 && plan.height === 4096, `×4 预估尺寸正确（${plan?.width}×${plan?.height}）`)
+  assert(plan.megapixels > 25 && plan.megapixels < 26, `百万像素数正确（${plan.megapixels}）`)
+  assert(plan.huge === true, '长边超 4096 时标记为「很大」，面板会出警告')
+  const small = icons.localOutputPlan('2', { uploadWidth: 800, uploadHeight: 600 })
+  assert(small.width === 1600 && small.huge === false, `×2 的小图不标「很大」（${small.width}×${small.height}）`)
+  assert(icons.localOutputPlan('4', null) === null, '没有底图时返回 null（不崩）')
+  assert(icons.localOutputPlan('', { uploadWidth: 10, uploadHeight: 10 }) === null, '倍数为空时返回 null（不崩）')
+  assert(icons.localOutputPlan('4', {}) === null, '底图缺尺寸时返回 null（不崩）')
+}
+
 console.log('\n== 滑动对比：指针换算与裁切（几何必须准） ==')
 const bounds = { left: 100, width: 400 }
 assert(icons.revealFromPointer(300, bounds) === 0.5, '正中间 → 0.5')

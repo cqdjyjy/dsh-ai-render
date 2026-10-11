@@ -882,6 +882,11 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       let submitted = original
       let cleaned = false
       let canvasUsed = false
+      // 画布尺寸存到**外层**变量：canvas 是在下面的 if 块里 const 的，
+      // 出了块就没了。曾经在 return 里直接引用 canvas.width → 整个上传抛
+      // `canvas is not defined`。
+      let uploadW = 0
+      let uploadH = 0
       // CAD 一律过一遍画布：既要缩到上限，也要判黑底反相。
       if (crop || scale < 1 || isCad) {
         const canvas = document.createElement('canvas')
@@ -891,6 +896,8 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         context.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
         if (isCad && clean !== false) cleaned = cleanCadCanvas(canvas).inverted
         canvasUsed = true
+        uploadW = canvas.width
+        uploadH = canvas.height
         // 底图**必须是 PNG**。
         //
         // 曾经的教训：为了省请求体积，按「照片用 JPEG / 线稿用 PNG」自动选格式，
@@ -916,8 +923,36 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         // **实际会送出去的**像素尺寸（上面那两个是原始裁切尺寸，可能远大于上传尺寸）。
         // 面板要靠它预估本地超分的输出有多大 —— 默认 ×4 在一张 2K 效果图上就是
         // 6144×4096 / 二十几 MB，跑起来要好几分钟，得让人**在点之前**看见。
-        uploadWidth: canvasUsed ? canvas.width : image.naturalWidth,
-        uploadHeight: canvasUsed ? canvas.height : image.naturalHeight,
+        //
+        // 注意：不能在 return 里直接写 canvas.width —— canvas 是在上面的 if 块里
+        // `const` 出来的，出了块就是未定义，整个上传会直接抛
+        // `canvas is not defined`（踩过，而且 node --check 与源码级断言都发现不了）。
+        uploadWidth: canvasUsed ? uploadW : image.naturalWidth,
+        uploadHeight: canvasUsed ? uploadH : image.naturalHeight,
+      }
+    }
+
+    /**
+     * 本地超分的输出预估（纯函数，方便离线测试）。
+     *
+     * 为什么要提前算：默认 ×4 在一张 2K 效果图上就是 6144×4096、二十几 MB、
+     * 老卡要好几分钟。不先说，用户只会等来一次超时或传输失败。
+     *
+     * 用 `uploadWidth/uploadHeight`（**实际会送出去的**尺寸），不是原始尺寸 ——
+     * 客户端会先把长边压到 MAX_IMAGE_SIDE 再上传，拿原图尺寸会算出吓人的假数字。
+     */
+    function localOutputPlan(scale, cad) {
+      const width0 = Number(cad?.uploadWidth) || 0
+      const height0 = Number(cad?.uploadHeight) || 0
+      const factor = Number(scale) || 0
+      if (!width0 || !height0 || !factor) return null
+      const width = width0 * factor
+      const height = height0 * factor
+      return {
+        width,
+        height,
+        megapixels: Math.round((width * height) / 1e5) / 10,
+        huge: Math.max(width, height) > 4096,
       }
     }
 
@@ -2453,23 +2488,15 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               ),
             ),
           ),
-          // 预估输出：**点之前**就让人看见后果。
-          // 默认 ×4 在一张 2K 效果图上就是 6144×4096 / 二十几 MB、老卡要好几分钟；
-          // 不说的话，用户只会等来一个超时或一次传输失败。
+          // 预估输出：**点之前**就让人看见后果（纯函数，离线可测）
           (() => {
-            const w = Number(cad?.uploadWidth) || 0
-            const h2 = Number(cad?.uploadHeight) || 0
-            const k = Number(esrgan.scale) || 0
-            if (!w || !h2 || !k) return null
-            const ow = w * k
-            const oh = h2 * k
-            const longSide = Math.max(ow, oh)
-            const huge = longSide > 4096
+            const plan = localOutputPlan(esrgan.scale, cad)
+            if (!plan) return null
             return h(
               'div',
               { className: 'cr-note' },
-              `预计输出 ${ow}×${oh}（约 ${((ow * oh) / 1e6).toFixed(1)} 百万像素）` +
-                (huge
+              `预计输出 ${plan.width}×${plan.height}（约 ${plan.megapixels} 百万像素）` +
+                (plan.huge
                   ? ' —— **很大**：老卡上可能要几分钟，产物也会有几十 MB。嫌慢就把倍数降下来。'
                   : ''),
             )
@@ -4076,6 +4103,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         clipInsetFor,
         // 只为了让测试能对它做源码级契约断言（底图必须编 PNG），不给真实调用
         prepareFromDataUrl,
+        localOutputPlan,
       },
     }
   },
