@@ -108,6 +108,15 @@ function boxBlur(src, width, height, radius) {
   return out
 }
 
+/** 提取亮度（Rec.601，和大部分图像工具的 luma 口径一致）。 */
+function toLuma(data, count) {
+  const luma = new Float32Array(count)
+  for (let i = 0, at = 0; i < count; i += 1, at += 3) {
+    luma[i] = 0.299 * data[at] + 0.587 * data[at + 1] + 0.114 * data[at + 2]
+  }
+  return luma
+}
+
 /** 亮度统计（给调用方一个"到底改了多少"的客观数字，不靠感觉）。 */
 function lumaStats(luma, count) {
   let sum = 0
@@ -122,18 +131,38 @@ function lumaStats(luma, count) {
 }
 
 /**
- * 局部层次（细节能量）= 平均 |亮度 − 模糊亮度|。
+ * 局部层次（细节能量）= 相邻像素亮度差的平均值。
  *
  * **别用全局标准差来代表「层次」**：在一张黑线白底的 CAD 图上，把暗部提亮
  * 会让全局标准差**下降**（黑不再那么黑），但画面的层次其实是变清楚的。
- * 全局 std 测的是「最亮和最暗差多远」，局部细节能量测的才是「中间调分不分得开」。
- * 两个都报，用户才知道到底发生了什么。
+ * 全局 std 测的是「最亮和最暗差多远」，相邻差测的才是「中间调分不分得开」。
+ *
+ * 为什么不用「亮度 − 模糊亮度」那个更讲究的口径：那要给**输出**再模糊一整张图，
+ * 在一张 2500 万像素的图上等于多出两个约 100MB 的 Float32Array。
+ * 宿主是单进程事件循环，这种同步内存峰值会把整个 DSH 拖住（甚至搞崩）。
+ * 相邻差 O(n)、零额外数组，方向性一样准。
  */
-function detailEnergy(luma, blurred, count) {
+function gradientEnergy(luma, width, height) {
   let sum = 0
-  for (let i = 0; i < count; i += 1) sum += Math.abs(luma[i] - blurred[i])
-  return Math.round((sum / count) * 100) / 100
+  let count = 0
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width
+    for (let x = 1; x < width; x += 1) {
+      sum += Math.abs(luma[row + x] - luma[row + x - 1])
+      count += 1
+    }
+  }
+  return count ? Math.round((sum / count) * 100) / 100 : 0
 }
+
+/**
+ * 层次增强的像素上限。
+ *
+ * 超过就**明确跳过并说明原因**，而不是硬算 —— 一张 6000×4000（2400 万像素）
+ * 的图要几个各约 96MB 的 Float32Array 加输出缓冲，同步跑完会把宿主卡住很久。
+ * 「跳过」也必须报出来（宿主会当告警显示），不能悄悄不生效。
+ */
+export const TONE_MAX_PIXELS = 30_000_000
 
 /**
  * 对 RGB 像素做层次增强。
@@ -147,7 +176,7 @@ function detailEnergy(luma, blurred, count) {
  *            before:{mean:number,std:number}, after:{mean:number,std:number},
  *            detailEnergy:null|{before:number,after:number}, clippedRatio:number}}
  */
-export function enhanceTone({ width, height, data, strength = 0 } = {}) {
+export function enhanceTone({ width, height, data, strength = 0, maxPixels = TONE_MAX_PIXELS } = {}) {
   const w = Math.round(Number(width))
   const h = Math.round(Number(height))
   if (!Number.isInteger(w) || !Number.isInteger(h) || w <= 0 || h <= 0) {
@@ -160,29 +189,44 @@ export function enhanceTone({ width, height, data, strength = 0 } = {}) {
 
   const s = Math.max(0, Math.min(100, Number(strength) || 0)) / 100
 
-  // 提取亮度（Rec.601，和大部分图像工具的 luma 口径一致）
-  const luma = new Float32Array(count)
-  for (let i = 0, at = 0; i < count; i += 1, at += 3) {
-    luma[i] = 0.299 * data[at] + 0.587 * data[at + 1] + 0.114 * data[at + 2]
-  }
-  const before = lumaStats(luma, count)
-
-  // 强度 0 = 完全不动（不复制、不重算，直接原样把数据还回去）
+  // 先看强度：0 = 完全不动（连亮度数组都不用建，直接原样把数据还回去）
   if (s <= 0) {
+    const flat = lumaStats(toLuma(data, count), count)
     return {
       data,
       applied: false,
       strength: 0,
       blurRadius: 0,
-      before,
-      after: before,
+      before: flat,
+      after: flat,
       detailEnergy: null,
       clippedRatio: 0,
     }
   }
 
+  // 太大就别硬算：同步跑完会长时间占住宿主的单线程，也吃一大片内存。
+  // 「跳过」必须带原因返回，让宿主如实告警，而不是悄悄不生效。
+  if (count > maxPixels) {
+    return {
+      data,
+      applied: false,
+      strength: Math.round(s * 100),
+      blurRadius: 0,
+      before: lumaStats(toLuma(data, count), count),
+      after: null,
+      detailEnergy: null,
+      clippedRatio: 0,
+      reason:
+        `图有 ${count} 像素，超过层次增强的上限 ${maxPixels}，已跳过以免占满内存。` +
+        '把放大倍数调小（例如 ×2）再试，或关掉层次增强。',
+    }
+  }
+
+  const luma = toLuma(data, count)
+  const before = lumaStats(luma, count)
   const blurRadius = Math.max(BLUR_MIN, Math.min(BLUR_MAX, Math.round(Math.min(w, h) * BLUR_RATIO)))
   const blurred = boxBlur(luma, w, h, blurRadius)
+  const beforeDetail = gradientEnergy(luma, w, h)
 
   const detailGain = EFFECT.detail * s
   const contrast = EFFECT.contrast * s
@@ -190,7 +234,13 @@ export function enhanceTone({ width, height, data, strength = 0 } = {}) {
 
   const out = Buffer.allocUnsafe(count * 3)
   let clipped = 0
-  const afterLuma = new Float32Array(count)
+  // 输出的亮度统计与「相邻差」都在主循环里**滚动累加**，不再为结果另建一张大数组：
+  // 2500 万像素时那等于省下约 200MB（一张 afterLuma + 一次全图模糊）。
+  let outSum = 0
+  let outSumSq = 0
+  let outGradient = 0
+  let outGradientCount = 0
+  let lastOutLuma = 0
 
   for (let i = 0, at = 0; i < count; i += 1, at += 3) {
     const base = luma[i]
@@ -228,10 +278,22 @@ export function enhanceTone({ width, height, data, strength = 0 } = {}) {
     out[at] = rc
     out[at + 1] = gc
     out[at + 2] = bc
-    afterLuma[i] = 0.299 * rc + 0.587 * gc + 0.114 * bc
+
+    const outLuma = 0.299 * rc + 0.587 * gc + 0.114 * bc
+    outSum += outLuma
+    outSumSq += outLuma * outLuma
+    if (i % w !== 0) {
+      outGradient += Math.abs(outLuma - lastOutLuma)
+      outGradientCount += 1
+    }
+    lastOutLuma = outLuma
   }
 
-  const beforeDetail = detailEnergy(luma, blurred, count)
+  const outMean = outSum / count
+  const after = {
+    mean: Math.round(outMean * 100) / 100,
+    std: Math.round(Math.sqrt(Math.max(0, outSumSq / count - outMean * outMean)) * 100) / 100,
+  }
 
   return {
     data: out,
@@ -239,8 +301,11 @@ export function enhanceTone({ width, height, data, strength = 0 } = {}) {
     strength: Math.round(s * 100),
     blurRadius,
     before,
-    after: lumaStats(afterLuma, count),
-    detailEnergy: { before: beforeDetail, after: detailEnergy(afterLuma, boxBlur(afterLuma, w, h, blurRadius), count) },
+    after,
+    detailEnergy: {
+      before: beforeDetail,
+      after: outGradientCount ? Math.round((outGradient / outGradientCount) * 100) / 100 : 0,
+    },
     // 溢出比例：告诉用户"有没有把亮部/暗部压死"，这比一句"已增强"有用得多
     clippedRatio: Math.round((clipped / count) * 10000) / 10000,
   }

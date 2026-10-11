@@ -881,6 +881,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       const isCad = kind === 'cad'
       let submitted = original
       let cleaned = false
+      let canvasUsed = false
       // CAD 一律过一遍画布：既要缩到上限，也要判黑底反相。
       if (crop || scale < 1 || isCad) {
         const canvas = document.createElement('canvas')
@@ -889,6 +890,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         const context = canvas.getContext('2d')
         context.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
         if (isCad && clean !== false) cleaned = cleanCadCanvas(canvas).inverted
+        canvasUsed = true
         // 底图**必须是 PNG**。
         //
         // 曾经的教训：为了省请求体积，按「照片用 JPEG / 线稿用 PNG」自动选格式，
@@ -911,6 +913,11 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         previewUrl: submitted,
         width: sw,
         height: sh,
+        // **实际会送出去的**像素尺寸（上面那两个是原始裁切尺寸，可能远大于上传尺寸）。
+        // 面板要靠它预估本地超分的输出有多大 —— 默认 ×4 在一张 2K 效果图上就是
+        // 6144×4096 / 二十几 MB，跑起来要好几分钟，得让人**在点之前**看见。
+        uploadWidth: canvasUsed ? canvas.width : image.naturalWidth,
+        uploadHeight: canvasUsed ? canvas.height : image.naturalHeight,
       }
     }
 
@@ -2446,6 +2453,27 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               ),
             ),
           ),
+          // 预估输出：**点之前**就让人看见后果。
+          // 默认 ×4 在一张 2K 效果图上就是 6144×4096 / 二十几 MB、老卡要好几分钟；
+          // 不说的话，用户只会等来一个超时或一次传输失败。
+          (() => {
+            const w = Number(cad?.uploadWidth) || 0
+            const h2 = Number(cad?.uploadHeight) || 0
+            const k = Number(esrgan.scale) || 0
+            if (!w || !h2 || !k) return null
+            const ow = w * k
+            const oh = h2 * k
+            const longSide = Math.max(ow, oh)
+            const huge = longSide > 4096
+            return h(
+              'div',
+              { className: 'cr-note' },
+              `预计输出 ${ow}×${oh}（约 ${((ow * oh) / 1e6).toFixed(1)} 百万像素）` +
+                (huge
+                  ? ' —— **很大**：老卡上可能要几分钟，产物也会有几十 MB。嫌慢就把倍数降下来。'
+                  : ''),
+            )
+          })(),
 
           // 模型
           h(

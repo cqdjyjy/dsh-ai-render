@@ -18,7 +18,7 @@ import path from 'node:path'
 import { promises as fsp } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { encodePngRgb, readPngPixels, readPngStats } from '../pngzip.js'
-import { TONE_LEVELS, enhanceTone } from '../tone.js'
+import { TONE_LEVELS, TONE_MAX_PIXELS, enhanceTone } from '../tone.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const fixtures = path.join(here, 'fixtures')
@@ -210,6 +210,14 @@ check(throws(() => enhanceTone({ width: 0, height: 10, data: Buffer.alloc(30), s
 check(throws(() => enhanceTone({ width: 10, height: 10, data: Buffer.alloc(10), strength: 50 })), '像素数据不足抛错')
 check(throws(() => encodePngRgb(0, 10, Buffer.alloc(30))), 'encodePngRgb 尺寸不合法抛错')
 check(throws(() => encodePngRgb(4, 4, Buffer.alloc(10))), 'encodePngRgb 数据不足抛错')
+
+// 超大图必须**明确跳过**，而不是硬算把宿主单线程卡死 / 吃爆内存
+const tiny = makeImage(8, 8, () => [128, 128, 128])
+const tooBig = enhanceTone({ width: 8, height: 8, data: tiny, strength: 65, maxPixels: 10 })
+check(tooBig.applied === false, '超过像素上限时跳过（不硬算）')
+check(/超过层次增强的上限/.test(tooBig.reason ?? ''), '跳过时给出原因（不静默不生效）')
+check(Buffer.compare(tooBig.data, tiny) === 0, '跳过时原样返回数据')
+check(TONE_MAX_PIXELS >= 12_000_000, `像素上限不算太保守（${TONE_MAX_PIXELS}）`)
 
 // ---------------------------------------------------------- 8. 编解码往返
 
