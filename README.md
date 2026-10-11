@@ -744,6 +744,7 @@ tile 越大接缝越少，可惜这块卡只能跑到 64。**对画质有要求�
 | 结构被模型改动 | 补一句「严格保持分格结构不变」；或换 Seedream / `gpt-image` |
 | 输出还是带尺寸线 | 补一句「去掉所有尺寸标注与文字」，或提高出图边长（config `maxSide`） |
 | 面板点生成没反应 | 刷新页面（插件前端改动后需要重新加载） |
+| `commands/execute failed: Failed to fetch` | 请求**根本没到宿主**，不是命令本身的错。① **先按 Ctrl+R 刷新** —— 服务重启过之后，旧页面就发不出请求了；② 看报错里那句「这次要上传约 X MB」，图太大就把底图裁小或缩一档；③ 都不行就重启 DSH |
 | 出图时报 `IMAGE_OFFLOAD_REQUIRED` 之类 | 图太大，先把 CAD 截图裁到只看柜体 |
 | 本地超分报`还没装本地超分引擎` | 面板点 **下载引擎**；或把 `esrganBin` 指向 `realesrgan-ncnn-vulkan.exe` |
 | 本地超分报`下载引擎失败` | GitHub 直连不通 → 填镜像地址（`esrganDownloadUrl`）；也别让代理/网关拦掉 40MB 的大响应 |

@@ -869,6 +869,31 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       return { inverted: true, mean }
     }
 
+    /**
+     * 这张图是不是「线稿」。
+     *
+     * 判据：绝大多数像素都挤在两头（接近纯黑或接近纯白）。线稿/施工图就是这样，
+     * 照片/效果图则分布在中间调。判不了就**当线稿**（保守：宁可文件大，也不糊线）。
+     *
+     * 为什么需要：`pickForWash` 把「已出的效果图」当底图时走的是 kind='cad' 那条路，
+     * 于是**一张 2048px 的照片也被编成 PNG**（4~6MB），base64 之后请求体接近 10MB，
+     * 很容易在传输层直接失败（Failed to fetch）—— 用户看到的就是一句莫名其妙的
+     * 「请求失败」。照片按 JPEG 走能小一个量级，而画质对模型来说没有区别。
+     */
+    function looksLikeLineArt(imageData) {
+      const pixels = imageData?.data
+      if (!pixels || !pixels.length) return true
+      let extreme = 0
+      let count = 0
+      // 抽样即可：一张图是不是线稿，看百分之几的像素就够
+      for (let i = 0; i < pixels.length; i += 4 * 7) {
+        const l = pixels[i] * 0.299 + pixels[i + 1] * 0.587 + pixels[i + 2] * 0.114
+        if (l < 64 || l > 200) extreme += 1
+        count += 1
+      }
+      return count === 0 ? true : extreme / count >= 0.9
+    }
+
     async function prepareFromDataUrl(original, name, kind, crop, clean) {
       const image = await loadImage(original)
       const rect = crop ?? { x: 0, y: 0, w: 1, h: 1 }
@@ -888,9 +913,20 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         canvas.height = Math.max(1, Math.round(sh * scale))
         const context = canvas.getContext('2d')
         context.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
+        // 先按 CAD 的需要做黑底反相，再判格式 —— 反相后的图才是真正要上传的东西
         if (isCad && clean !== false) cleaned = cleanCadCanvas(canvas).inverted
-        // CAD 是线稿，PNG 不糊线；参考图是照片，JPEG 更省体积。
-        submitted = isCad ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.92)
+        // 线稿用 PNG（JPEG 会把细线糊掉、直接影响结构还原）；照片用 JPEG（小一个量级）
+        let usePng = !isCad
+        if (isCad) {
+          let sample = null
+          try {
+            sample = context.getImageData(0, 0, canvas.width, canvas.height)
+          } catch {
+            sample = null // 取不到像素就当线稿，宁可大也不糊线
+          }
+          usePng = sample ? looksLikeLineArt(sample) : true
+        }
+        submitted = usePng ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', 0.92)
       }
       const comma = submitted.indexOf(',')
       return {
@@ -980,11 +1016,30 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
     }
 
     async function callCommand(ctx, sessionId, job, attachments) {
-      const envelope = await ctx.remote.commands.execute(
-        sessionId,
-        `/${COMMAND} ${encodeJob(job)}`,
-        attachments,
-      )
+      let envelope
+      try {
+        envelope = await ctx.remote.commands.execute(
+          sessionId,
+          `/${COMMAND} ${encodeJob(job)}`,
+          attachments,
+        )
+      } catch (failure) {
+        // fetch 层失败（浏览器只说一句 "Failed to fetch"）意味着请求**根本没到宿主**，
+        // 不是命令本身的错。原来的报错把这句话原样抛给用户，等于没说。
+        // 这里把三种真实原因摆出来，并带上这次要传的字节数。
+        const message = String(failure?.message ?? failure)
+        if (/failed to fetch|networkerror|load failed|network request failed/i.test(message)) {
+          const bytes = (attachments ?? []).reduce((sum, item) => sum + (item?.data?.length ?? 0), 0)
+          const mb = bytes / 1048576
+          throw new Error(
+            `请求没能发到宿主（${message}）。这次要上传约 ${mb.toFixed(1)} MB。常见原因：` +
+              '① 页面比服务端旧（服务重启过）→ 按 Ctrl+R 刷新页面；' +
+              '② 图太大，传输层直接断了 → 把底图裁小或缩一档再试；' +
+              '③ 本机服务没在跑 → 重新启动 DSH。',
+          )
+        }
+        throw failure
+      }
       if (!envelope || envelope.ok !== true) {
         throw new Error(envelope?.error?.message ?? 'Remote 调用失败（commands.execute）。')
       }
@@ -1964,7 +2019,14 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               tta: Boolean(data.tta),
               detail: String(data.detail ?? previous.detail),
             }))
-            if (data.probe?.runnable === true) {
+            if (!probe) {
+              // 不跑探针时不覆盖上次的结论：状态是「装没装」，探针是「这块卡能不能跑」
+              setEngineNote(
+                data.installed
+                  ? '引擎已就位；这块显卡能不能跑要实测才知道 —— 点「检测显卡能不能跑」。'
+                  : '还没装引擎。点「下载引擎」自动装，或在下面指定引擎路径。',
+              )
+            } else if (data.probe?.runnable === true) {
               const names = (data.probe.devices ?? []).map((item) => item.name).join('、')
               setEngineNote(
                 `引擎可用 · ${names ? `识别到显卡：${names}` : '已能正常出图（引擎没报告显卡名）'}` +
@@ -1984,10 +2046,18 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         [ctx, sessionId],
       )
 
-      /** 切到本地超分时自动检测一次；引擎对象已有就不再重复跑（省得每次渲染都起进程）。 */
+      /**
+       * 切到本地超分时自动查一次**状态**（引擎在不在、路径、模型）—— 这一步只是读文件，
+       * 瞬间返回。
+       *
+       * 但**不在这里跑真实探针**：探针要真的让 GPU 算一张图，老卡上实测要 10 秒左右。
+       * 把它塞进面板一打开就发的命令请求里，就成了「一个 10 秒不返回的请求」——
+       * 传输层一超时，用户看到的就是 `commands/execute failed: Failed to fetch`，
+       * 而且完全看不出跟显卡检测有关。探针改成用户点按钮才跑。
+       */
       React.useEffect(() => {
         if (!localMode || engine || engineBusy) return
-        loadEngine(true)
+        loadEngine(false)
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [localMode, engine, engineBusy, loadEngine])
 
@@ -2321,9 +2391,11 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
        */
       function localEngineBlock() {
         const devices = engine?.probe?.devices ?? []
+        const installed = Boolean(engine?.installed)
+        const probed = Boolean(engine?.probe)
         // 「能不能跑」以**探针真的算出一张图**为准，而不是「有没有列出显卡名」：
         // 引擎有可能不打印设备行却照样算得出来（那时说它不可用就是误报）。
-        const ready = Boolean(engine?.installed) && (engine?.probe?.runnable === true || devices.length > 0)
+        const ready = installed && (engine?.probe?.runnable === true || devices.length > 0)
         const SOURCE_LABEL = {
           setting: '设置里指定的路径',
           managed: '插件自管目录',
@@ -2331,12 +2403,14 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         }
         const deviceText = devices.length ? `识别到显卡：${devices.map((item) => item.name).join('、')}` : '引擎没报告显卡名'
         const statusText = engineBusy
-          ? engineNote || '正在检测引擎与显卡（会真的算一张小图，稍等几秒）…'
+          ? engineNote || '正在检测引擎与显卡（会真的算一张小图，老卡可能十几秒）…'
           : engine
             ? engineNote ||
               (ready
                 ? `引擎可用 · ${deviceText}`
-                : '引擎状态未知，点「重新检测」再试一次。')
+                : installed
+                  ? '引擎已就位；这块显卡能不能跑要实测才知道 —— 点「检测显卡能不能跑」。'
+                  : '引擎状态未知，点「重新检测」再试一次。')
             : '还没检测过引擎。'
         return h(
           'div',
@@ -2351,7 +2425,8 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               '用本机显卡做真超分：不联网、不花钱、图不外传。需要一块能跑 Vulkan 的显卡（NVIDIA / AMD / Intel 都行）',
             ),
           ),
-          h('div', { className: ready ? 'cr-ok' : 'cr-error' }, statusText),
+          // 装了但还没实测过，不算错误 —— 用中性/正常样式，别一打开就红一片
+          h('div', { className: installed ? 'cr-ok' : 'cr-error' }, statusText),
           // 探针建议：配置的 tile 跑不通、降一档能跑通时，把这件事直接说出来
           engine?.probe?.hint && h('div', { className: 'cr-note' }, `⚠ ${engine.probe.hint}`),
           engine?.bin &&
@@ -2370,7 +2445,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
             h(
               'button',
               { className: 'cr-btn', type: 'button', disabled: engineBusy, onClick: () => loadEngine(true) },
-              '重新检测',
+              probed ? '重新检测' : '检测显卡能不能跑',
             ),
           ),
 
@@ -3999,6 +4074,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         refitCropRect,
         revealFromPointer,
         clipInsetFor,
+        looksLikeLineArt,
       },
     }
   },

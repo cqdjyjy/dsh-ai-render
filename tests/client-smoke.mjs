@@ -445,6 +445,40 @@ assert(
   '手动点击 / 从历史还原都标记为「已选过」（不被自动挑选顶掉）',
 )
 
+console.log('\n== 上传格式：线稿用 PNG、照片用 JPEG（请求体别撑爆） ==')
+// 背景：把「已出的效果图」当底图洗图/改图时走的是 kind='cad' 那条路，
+// 以前一律编成 PNG —— 一张 2048px 的照片就是 4~6MB，base64 后接近 10MB，
+// 很容易在传输层直接失败（Failed to fetch）。判据用「像素挤在两头的比例」。
+const lineArtPixels = (() => {
+  // 白底黑线：98% 的像素落在两头
+  const data = new Uint8ClampedArray(100 * 4)
+  for (let i = 0; i < 100; i += 1) {
+    const value = i % 50 === 0 ? 0 : 255
+    data[i * 4] = value
+    data[i * 4 + 1] = value
+    data[i * 4 + 2] = value
+    data[i * 4 + 3] = 255
+  }
+  return { data }
+})()
+const photoPixels = (() => {
+  // 中间调渐变的「照片」：几乎没有像素在两头
+  const data = new Uint8ClampedArray(100 * 4)
+  for (let i = 0; i < 100; i += 1) {
+    const value = 90 + Math.round((i / 100) * 70) // 90~160
+    data[i * 4] = value
+    data[i * 4 + 1] = value
+    data[i * 4 + 2] = value
+    data[i * 4 + 3] = 255
+  }
+  return { data }
+})()
+assert(icons.looksLikeLineArt(lineArtPixels) === true, '白底黑线判为线稿 → 用 PNG（不糊线）')
+assert(icons.looksLikeLineArt(photoPixels) === false, '中间调照片判为照片 → 用 JPEG（小一个量级）')
+// 判不了就当线稿：宁可文件大，也不要把细线糊掉
+assert(icons.looksLikeLineArt(null) === true, '没有像素数据时保守当成线稿')
+assert(icons.looksLikeLineArt({ data: new Uint8ClampedArray(0) }) === true, '空像素保守当成线稿')
+
 console.log('\n== 滑动对比：指针换算与裁切（几何必须准） ==')
 const bounds = { left: 100, width: 400 }
 assert(icons.revealFromPointer(300, bounds) === 0.5, '正中间 → 0.5')
