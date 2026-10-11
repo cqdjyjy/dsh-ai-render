@@ -99,6 +99,30 @@ const cleared = await invoke({ action: 'configure', openaiApiKey: '' })
 check(cleared.json?.openai?.configured === false, '空串 = 清除')
 check(!('openaiApiKey' in JSON.parse(await fsp.readFile(file, 'utf8'))), '文件里不再有该键')
 
+// ---------------------------------------------------------------- 401 要翻译成人话
+//
+// 用户报过「效果图生成失败：接口调用失败（HTTP 401）：The API key doesn't exist」。
+// 实测确认过我们的请求格式是对的 —— 方舟**只有在读到 Key 时**才会说
+// "doesn't exist"，没读到只会说 "missing or invalid"。所以这句话必须点明
+// 「是 Key 本身失效」并给出下一步，而不是让用户以为插件坏了。
+console.log('\n== 5. 401 鉴权错误要给出可执行的下一步 ==')
+{
+  const { httpErrorHint } = await import(`file://${path.join(here, '..', 'index.js').replaceAll('\\', '/')}`)
+
+  const gone = httpErrorHint(401, "The API key doesn't exist. Request id: 021...", 'ark')
+  check(/方舟/.test(gone), '说清是哪个通道（方舟）')
+  check(/Key 不存在/.test(gone), '点明「这把 Key 不存在」，而不是笼统的调用失败')
+  check(/重新复制/.test(gone) && /出图通道/.test(gone), '给出两个可执行动作：换 Key 或换通道')
+  check(/它已经读到 Key 了/.test(gone), '说清「格式没问题」，省得用户去怀疑请求头')
+
+  const generic = httpErrorHint(401, 'Unauthorized', 'openai')
+  check(/OpenAI 兼容通道/.test(generic), '泛指 401 也带上通道名')
+  check(!/不存在/.test(generic), '没读到 Key 的 401 不能误判成「Key 不存在」')
+
+  check(httpErrorHint(500, "The API key doesn't exist", 'ark') === '', '非鉴权错误不加这段提示')
+  check(httpErrorHint(429, 'rate limit', 'ark') === '', '限流不加鉴权提示')
+}
+
 await fsp.rm(fakeHome, { recursive: true, force: true })
 console.log(failures === 0 ? '\nSETTINGS IO TEST PASSED' : `\nSETTINGS IO TEST FAILED (${failures})`)
 process.exit(failures === 0 ? 0 : 1)

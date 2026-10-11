@@ -804,7 +804,35 @@ function apiKeyOf(settings, provider) {
 
 // ---------------------------------------------------------------- HTTP
 
-async function postJson(url, headers, body, signal) {
+/**
+ * 把 HTTP 鉴权错误翻译成「用户能照着做」的话。
+ *
+ * 401 是最容易被误判的一类：用户看到「接口调用失败」只会以为是插件坏了，
+ * 实际上绝大多数情况是**这把 Key 在对方那边已经不存在了**（删过 / 重新生成过 /
+ * 复制少了几位）。
+ *
+ * 实测区分（2026-10-11，方舟）：
+ *   Authorization: Bearer <key>  → "The API key doesn't exist."        ← 它**读到了** Key，查无此 Key
+ *   不带 / 换别的头              → "...key or AK/SK ... missing or invalid"  ← 它压根没找到 Key
+ * 所以只要看到前一句，就能确定**请求格式没问题，是 Key 本身失效**，
+ * 不必让用户去怀疑插件或请求头。
+ */
+export function httpErrorHint(status, detail, provider) {
+  if (status !== 401 && status !== 403) return ''
+  const which = provider === 'ark' ? '方舟（火山引擎）' : provider === 'openai' ? 'OpenAI 兼容通道' : '这个通道'
+  if (/does ?n'?t exist|does not exist|not exist/i.test(String(detail))) {
+    return (
+      `\n\n**${which}明确说「这把 Key 不存在」** —— 它已经读到 Key 了（不然只会说「没带 Key」），` +
+      `是这把 Key 在它那边查不到。常见原因：在控制台删过 / 重新生成过 / 复制时少了几位。\n` +
+      '① 到控制台重新复制一把完整 Key，粘进面板「设置」再保存；\n' +
+      '② 或者**先把出图通道换成另一个**（面板顶部「出图通道」）先干活。' +
+      (provider === 'ark' ? '\n（实测：另一条 OpenAI 兼容通道当时是通的，可以直接切过去。）' : '')
+    )
+  }
+  return `\n\n${which}拒绝了这次请求：多半是 Key 填错 / 已失效，或这个模型不在你的套餐权限里。`
+}
+
+async function postJson(url, headers, body, signal, provider) {
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
@@ -820,7 +848,7 @@ async function postJson(url, headers, body, signal) {
   }
   if (!response.ok) {
     const detail = json?.error?.message ?? json?.message ?? json?.error ?? text.slice(0, 300)
-    throw new Error(`接口调用失败（HTTP ${response.status}）：${detail}`)
+    throw new Error(`接口调用失败（HTTP ${response.status}）：${detail}${httpErrorHint(response.status, detail, provider)}`)
   }
   if (json?.code && String(json.code) !== '0') {
     throw new Error(`接口返回错误 ${json.code}：${json.message ?? ''}`)
@@ -859,7 +887,7 @@ async function callArk({ apiKey, baseUrl, model, prompt, images, size, count, si
   let json
   try {
     // 优先发像素尺寸：我们要的是「画布比例和底图一致」，这是压住结构被改的关键。
-    json = await postJson(url, headers, buildBody(`${size.width}x${size.height}`), signal)
+    json = await postJson(url, headers, buildBody(`${size.width}x${size.height}`), signal, 'ark')
   } catch (failure) {
     // 但各家对 size 的接受范围不一致（Agent Plan 的示例用的是 "2K" 这种档位字符串）。
     // 像素被拒时退回档位写法再试一次 —— 总比直接失败好，用户至少能拿到图。
@@ -875,7 +903,7 @@ async function callArk({ apiKey, baseUrl, model, prompt, images, size, count, si
       )
     }
     if (!/size|尺寸|分辨率|resolution|宽高|invalid/i.test(text)) throw failure
-    json = await postJson(url, headers, buildBody('2K'), signal)
+    json = await postJson(url, headers, buildBody('2K'), signal, 'ark')
   }
   const list = Array.isArray(json?.data) ? json.data : []
   const out = []
@@ -907,6 +935,7 @@ async function callQwen({ apiKey, baseUrl, model, prompt, images, size, count, s
     { authorization: `Bearer ${apiKey}` },
     body,
     signal,
+    'dashscope',
   )
   const choices = json?.output?.choices ?? []
   const out = []
@@ -1037,7 +1066,13 @@ async function callOpenAiGenerations({ apiKey, baseUrl, model, prompt, images, s
   if (includeRefs && images.length > 0) {
     body.image = images.length === 1 ? images[0].dataUrl : images.map((image) => image.dataUrl)
   }
-  const json = await postJson(`${baseUrl}/images/generations`, { authorization: `Bearer ${apiKey}` }, body, signal)
+  const json = await postJson(
+    `${baseUrl}/images/generations`,
+    { authorization: `Bearer ${apiKey}` },
+    body,
+    signal,
+    'openai',
+  )
   const out = []
   for (const item of json?.data ?? []) {
     if (item?.b64_json) out.push({ data: Buffer.from(item.b64_json, 'base64'), mediaType: 'image/png' })
@@ -1056,11 +1091,12 @@ async function callOpenAiChat({ apiKey, baseUrl, model, prompt, images, size, co
     { authorization: `Bearer ${apiKey}` },
     { model, messages: [{ role: 'user', content }], n: Math.max(1, Math.min(10, count)) },
     signal,
+    'openai',
   )
   const found = extractImagesFromChat(json)
   if (found.length === 0) {
     // 把模型回的文字带出来，方便判断是「不支持出图」还是「被拒」。
-const texts = []
+    const texts = []
     for (const choice of json?.choices ?? []) {
       const part = choice?.message?.content
       if (typeof part === 'string') texts.push(part)
