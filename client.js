@@ -1029,43 +1029,61 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
       return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
     }
 
+    /**
+     * 是不是**传输层**失败（请求根本没到宿主 / 连接断了）。
+     *
+     * 这类失败是**可以安全重试**的：命令压根没跑起来，不会重复出图。
+     * 命令自己返回的错误（kind:'error'）绝不能重试 —— 那可能已经出过图、计过费。
+     */
+    function isTransportFailure(message) {
+      return /failed to fetch|networkerror|load failed|network request failed|has no active connection|stream has terminated|uplink was ended|remote method is no longer mounted/i.test(
+        String(message ?? ''),
+      )
+    }
+
     async function callCommand(ctx, sessionId, job, attachments) {
-      let envelope
-      try {
-        envelope = await ctx.remote.commands.execute(
-          sessionId,
-          `/${COMMAND} ${encodeJob(job)}`,
-          attachments,
-        )
-      } catch (failure) {
-        // fetch 层失败（浏览器只说一句 "Failed to fetch"）意味着请求**根本没到宿主**，
-        // 不是命令本身的错。原来的报错把这句话原样抛给用户，等于没说。
-        // 这里把三种真实原因摆出来，并带上这次要传的字节数。
-        const message = String(failure?.message ?? failure)
-        if (/failed to fetch|networkerror|load failed|network request failed/i.test(message)) {
-          const bytes = (attachments ?? []).reduce((sum, item) => sum + (item?.data?.length ?? 0), 0)
-          const mb = bytes / 1048576
-          throw new Error(
-            `请求没能发到宿主（${message}）。这次要上传约 ${mb.toFixed(1)} MB。常见原因：` +
-              '① 页面比服务端旧（服务重启过）→ 按 Ctrl+R 刷新页面；' +
-              '② 图太大，传输层直接断了 → 把底图裁小或缩一档再试；' +
-              '③ 本机服务没在跑 → 重新启动 DSH。',
-          )
+      const line = `/${COMMAND} ${encodeJob(job)}`
+      // 最多两次：宿主重启/连接抖动时，第一次往往赶在通道重建之前。
+      // 网关自己有一套重连退避，但**单次调用不会替你等**，所以这里补一次。
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        let envelope
+        try {
+          envelope = await ctx.remote.commands.execute(sessionId, line, attachments)
+        } catch (failure) {
+          const message = String(failure?.message ?? failure)
+          if (attempt === 0 && isTransportFailure(message)) {
+            // 等通道重建再试一次；不打扰用户（这正是「刚才那次没反应」的真相）
+            await new Promise((resolve) => setTimeout(resolve, 1500))
+            continue
+          }
+          if (isTransportFailure(message)) {
+            // 重试过还是不通 —— 那多半是页面本身过期了，把三种真实原因摆出来，
+            // 并带上这次要传的字节数，别只丢一句 "Failed to fetch"。
+            const bytes = (attachments ?? []).reduce((sum, item) => sum + (item?.data?.length ?? 0), 0)
+            throw new Error(
+              `和后端的连接断了，重试一次仍然不通（${message}）。这次要上传约 ${(bytes / 1048576).toFixed(1)} MB。` +
+                '最可能是页面比服务端旧（DSH 重启过）→ **按 Ctrl+R 刷新页面**；' +
+                '若刷新无效，请重启 DSH。也可能是图太大把连接撑断了 → 把底图裁小或缩一档。',
+            )
+          }
+          throw failure
         }
-        throw failure
+        if (!envelope || envelope.ok !== true) {
+          throw new Error(envelope?.error?.message ?? 'Remote 调用失败（commands.execute）。')
+        }
+        const execution = envelope.value
+        if (!execution) throw new Error('命令未注册或写法不合法（cabinet-render）。')
+        const result = execution.result
+        if (!result || result.kind === 'error') throw new Error(result?.text || '生成失败。')
+        try {
+          return JSON.parse(result.text ?? '{}')
+        } catch {
+          throw new Error(result.text || '生成结果无法解析。')
+        }
       }
-      if (!envelope || envelope.ok !== true) {
-        throw new Error(envelope?.error?.message ?? 'Remote 调用失败（commands.execute）。')
-      }
-      const execution = envelope.value
-      if (!execution) throw new Error('命令未注册或写法不合法（cabinet-render）。')
-      const result = execution.result
-      if (!result || result.kind === 'error') throw new Error(result?.text || '生成失败。')
-      try {
-        return JSON.parse(result.text ?? '{}')
-      } catch {
-        throw new Error(result.text || '生成结果无法解析。')
-      }
+      // 循环正常结束只有一种可能：第一次是传输失败并 continue 了，第二次又被 continue —— 不存在，
+      // 因为 attempt===1 时不会再 continue。留着这句是为了绝不静默返回 undefined。
+      throw new Error('命令调用失败：重试后仍未拿到结果。')
     }
 
     /**
@@ -4104,6 +4122,8 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         // 只为了让测试能对它做源码级契约断言（底图必须编 PNG），不给真实调用
         prepareFromDataUrl,
         localOutputPlan,
+        callCommand,
+        isTransportFailure,
       },
     }
   },

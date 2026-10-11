@@ -529,6 +529,64 @@ console.log('\n== 本地超分的输出预估（面板要在点之前说清后�
   assert(icons.localOutputPlan('4', {}) === null, '底图缺尺寸时返回 null（不崩）')
 }
 
+console.log('\n== 传输层抖动要自动重试一次（宿主重启不该让你白点一次） ==')
+{
+  const okEnvelope = { ok: true, value: { commandId: 'c', result: { kind: 'success', text: '{"ok":true,"v":7}' } } }
+  const makeCtx = (sequence) => {
+    const ctx = {
+      calls: 0,
+      remote: {
+        commands: {
+          async execute() {
+            const step = sequence[Math.min(ctx.calls, sequence.length - 1)]
+            ctx.calls += 1
+            if (step === 'transport') throw new Error('client api: commands/execute failed: Failed to fetch')
+            if (step === 'commandError') {
+              return { ok: true, value: { commandId: 'c', result: { kind: 'error', text: '命令自己失败了' } } }
+            }
+            return okEnvelope
+          },
+        },
+      },
+    }
+    return ctx
+  }
+
+  // (a) 第一次传输失败、第二次成功 → 应当**自动恢复**，用户根本不该看到错
+  const flaky = makeCtx(['transport', 'ok'])
+  const recovered = await icons.callCommand(flaky, 's', { action: 'status' }, [])
+  assert(recovered.v === 7, '首次传输失败会自动重试并成功（用户看不到错）')
+  assert(flaky.calls === 2, `确实重试了一次（调用 ${flaky.calls} 次）`)
+
+  // (b) 两次都传输失败 → 报错要说清「刷新页面」，不能只丢 Failed to fetch
+  const dead = makeCtx(['transport', 'transport'])
+  let deadMessage = ''
+  try {
+    await icons.callCommand(dead, 's', { action: 'status' }, [])
+  } catch (error) {
+    deadMessage = String(error?.message ?? error)
+  }
+  assert(dead.calls === 2, `两次都失败时也只试两次（调用 ${dead.calls} 次）`)
+  assert(/Ctrl\+R/.test(deadMessage), `报错给出「刷新页面」这个动作：${deadMessage.slice(0, 34)}…`)
+  assert(/重试一次仍然不通/.test(deadMessage), '报错说清「已经重试过」')
+
+  // (c) **命令自己失败绝不能重试** —— 那可能已经出过图、计过费
+  const cmdFail = makeCtx(['commandError'])
+  let cmdMessage = ''
+  try {
+    await icons.callCommand(cmdFail, 's', { action: 'status' }, [])
+  } catch (error) {
+    cmdMessage = String(error?.message ?? error)
+  }
+  assert(cmdFail.calls === 1, `命令级错误不重试（调用 ${cmdFail.calls} 次）`)
+  assert(cmdMessage === '命令自己失败了', `命令级错误原文透传（${cmdMessage}）`)
+
+  // (d) 判定函数本身
+  assert(icons.isTransportFailure('client api: commands/execute failed: Failed to fetch') === true, '认出 Failed to fetch')
+  assert(icons.isTransportFailure('api gateway: has no active Connection') === true, '认出「没有活动连接」')
+  assert(icons.isTransportFailure('还没配置火山方舟 API Key') === false, '业务错误不算传输失败')
+}
+
 console.log('\n== 滑动对比：指针换算与裁切（几何必须准） ==')
 const bounds = { left: 100, width: 400 }
 assert(icons.revealFromPointer(300, bounds) === 0.5, '正中间 → 0.5')
