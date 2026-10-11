@@ -1357,6 +1357,9 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
         tile: '64',
         gpu: '',
         tta: false,
+        // 层次增强：非 AI 的色调后处理。**默认关闭** —— 它会改像素，
+        // 而「纯超分 = 原样放大」是这条通道对用户的承诺，默认不能动它。
+        detail: '0',
       })
       const [engine, setEngine] = React.useState(null)
       const [engineNote, setEngineNote] = React.useState('')
@@ -1631,6 +1634,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               job.esrganTile = esrgan.tile
               job.esrganGpu = esrgan.gpu
               job.esrganTta = esrgan.tta ? '1' : '0'
+              job.esrganDetail = esrgan.detail
               // 本地超分没有提示词，也没有质检；把云通道那套字段清掉，
               // 免得宿主把它们当成一次云出图（那就会去要 API Key）。
               delete job.plain
@@ -1920,6 +1924,7 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               tile: String(data.tile ?? previous.tile),
               gpu: data.gpu ?? previous.gpu,
               tta: Boolean(data.tta),
+              detail: String(data.detail ?? previous.detail),
             }))
             if (data.probe?.runnable === true) {
               const names = (data.probe.devices ?? []).map((item) => item.name).join('、')
@@ -2442,6 +2447,53 @@ button.cr-icon:hover{color:var(--dsw-alias-label-primary)}
               esrgan.tta ? '✓ TTA 增强（慢，更干净）' : 'TTA 增强（慢，更干净）',
             ),
           ),
+
+          // 层次增强：非 AI 的色调后处理。措辞必须说清「不是打光」，
+          // 否则用户会以为这里能换日光/换黄昏 —— 那需要生成式模型（走云 AI 的一键操作）。
+          h(
+            'div',
+            { className: 'cr-label', style: { marginTop: '2px' } },
+            '层次增强',
+            h(
+              'span',
+              null,
+              '非 AI 的色调后处理：局部对比 + 明暗曲线，让发灰发软的图更有层次。' +
+                '**它不是打光** —— 不会换日光/黄昏、不会改光照方向；而且**会改像素**（关闭时才是原样放大）',
+            ),
+          ),
+          h(
+            'div',
+            { className: 'cr-chips' },
+            (
+              engine?.toneLevels ?? [
+                { id: '0', label: '关闭', hint: '' },
+                { id: '35', label: '轻', hint: '' },
+                { id: '65', label: '中', hint: '' },
+                { id: '100', label: '强', hint: '' },
+              ]
+            ).map((item) =>
+              h(
+                'button',
+                {
+                  key: item.id,
+                  className: 'cr-chip',
+                  type: 'button',
+                  'data-active': esrgan.detail === item.id ? '1' : '0',
+                  title: item.hint,
+                  disabled: busy,
+                  onClick: () => setEsrgan((previous) => ({ ...previous, detail: item.id })),
+                },
+                item.label,
+              ),
+            ),
+          ),
+          esrgan.detail !== '0' &&
+            h(
+              'div',
+              { className: 'cr-note' },
+              '⚠ 已开启层次增强：产物不再是「原样放大」的结果，像素被改过。' +
+                '想要纯超分就切回「关闭」。要真正换光影，请用结果卡上的「换日光 / 换黄昏」等一键操作（走云 AI）。',
+            ),
           h(
             'div',
             { className: 'cr-note' },

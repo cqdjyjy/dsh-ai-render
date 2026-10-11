@@ -20,6 +20,7 @@
     "client.js",
     "presets.js",
     "esrgan.js",
+    "tone.js",
     "pngzip.js",
     "icon.svg",
     "cordis.patch.yml",

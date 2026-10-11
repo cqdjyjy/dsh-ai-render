@@ -436,7 +436,7 @@ console.log('\n== 4. 端到端：假引擎跑通本地超分 ==')
   check(result.local.engine === engineBin, '回报了引擎路径')
   check(Array.isArray(result.local.warnings) && result.local.warnings.length === 0, '没有多余告警')
   check(result.files.length === 1, '产出 1 个文件')
-  check(/^upscale_\d{8}_\d{6}_2x\.png$/.test(result.files[0].name), `文件名规范：${result.files[0].name}`)
+  check(/^upscale_\d{8}_\d{6}_2x(-\d+)?\.png$/.test(result.files[0].name), `文件名规范：${result.files[0].name}`)
 
   // 落盘的图必须是真图：尺寸对、不是纯色
   const written = readPngStats(await fsp.readFile(result.files[0].path))
@@ -463,6 +463,77 @@ console.log('\n== 4. 端到端：假引擎跑通本地超分 ==')
     (await fsp.readdir(out)).every((name) => !name.startsWith('.esrgan-')),
     '跑完把临时目录清掉了（出图目录里不留 .esrgan-*）',
   )
+}
+
+// ---------------------------------------------------------------- 4.5 层次增强
+console.log('\n== 4.5 层次增强（本地色调后处理，默认关闭）==')
+{
+  setMode('ok')
+  // 默认（设置里没写 esrganDetail）= 关闭：产物必须是「原样放大」
+  const plain = await call({ taskMode: 'superres', esrganScale: '2', esrganTile: '128' }, [cadBlock])
+  setMode(null)
+  check(plain.local.detail === 0, '默认 detail=0（关闭）')
+  check(plain.local.tone === null, '关闭时不产生 tone 报告')
+  check(
+    !plain.local.warnings.some((text) => text.includes('层次增强')),
+    '关闭时不会声称做了层次增强',
+  )
+
+  // 打开：产物必须变，而且要把「改了像素、不是打光」说清楚
+  setMode('ok')
+  const enhanced = await call(
+    { taskMode: 'superres', esrganScale: '2', esrganTile: '128', esrganDetail: '65' },
+    [cadBlock],
+  )
+  setMode(null)
+  check(enhanced.local.detail === 65, `开关真的传到了宿主（detail=${enhanced.local.detail}）`)
+  check(enhanced.local.tone?.applied === true, '打开时 tone.applied=true')
+  check(enhanced.local.tone?.strength === 65, '报告里带上强度')
+  const toneWarning = enhanced.local.warnings.find((text) => text.includes('层次增强已开启')) ?? ''
+  check(Boolean(toneWarning), '结果里明确告知「已开启层次增强」')
+  check(/不是重新打光/.test(toneWarning), '措辞说清「不是重新打光」')
+  check(/改了像素/.test(toneWarning), '措辞说清「改了像素」')
+  check(
+    /局部层次/.test(toneWarning),
+    `报告用「局部层次」而不是只看全局标准差：${toneWarning.slice(0, 80)}…`,
+  )
+
+  // 两张产物必须不一样 —— 否则就是「填了没生效」
+  //
+  // 而且**路径也必须不同**：文件名是秒级时间戳，同秒内跑两次原本会静默覆盖
+  // （用户连点两下就丢一张图）。这里把它钉死。
+  check(
+    plain.files[0].path !== enhanced.files[0].path,
+    `同秒内的两次超分不互相覆盖（${path.basename(plain.files[0].path)} vs ${path.basename(enhanced.files[0].path)}）`,
+  )
+  const plainBytes = await fsp.readFile(plain.files[0].path)
+  const enhancedBytes = await fsp.readFile(enhanced.files[0].path)
+  check(!plainBytes.equals(enhancedBytes), '开启前后的产物确实不同（不是填了没生效）')
+  const plainStats = readPngStats(plainBytes)
+  const enhancedStats = readPngStats(enhancedBytes)
+  check(
+    plainStats.width === enhancedStats.width && plainStats.height === enhancedStats.height,
+    '层次增强不改变分辨率',
+  )
+  // 这里只验证「接线通了、产物真的变了」——**像素语义归 tests/tone.mjs 管**，
+  // 因为假引擎吐的是合成梯度，拿它的 min/mean 去断言语义没有意义（踩过）。
+  check(
+    enhancedStats.mean !== plainStats.mean,
+    `画面整体亮度被改动（${plainStats.mean} → ${enhancedStats.mean}）`,
+  )
+  check(
+    enhanced.local.tone?.clippedRatio !== undefined,
+    `结果里带上溢出比例（${enhanced.local.tone?.clippedRatio}）`,
+  )
+
+  // 非法强度不该炸，应该被夹到合法区间
+  setMode('ok')
+  const clamped = await call(
+    { taskMode: 'superres', esrganScale: '2', esrganTile: '128', esrganDetail: '999' },
+    [cadBlock],
+  )
+  setMode(null)
+  check(clamped.local.detail === 100, `强度超上限被夹到 100（实为 ${clamped.local.detail}）`)
 }
 
 // ---------------------------------------------------------------- 5. 纯黑必须是失败

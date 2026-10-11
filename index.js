@@ -54,6 +54,8 @@ import {
   probeEsrgan,
   runUpscale,
 } from './esrgan.js'
+import { TONE_LEVELS, enhanceTone } from './tone.js'
+import { encodePngRgb, readPngPixels } from './pngzip.js'
 
 export const name = 'ai-render'
 export { parseJobInput, fitSize, serviceOf, agyPrompt, harvestAgyImages, agyHomeDir, agyIndex, walkDir }
@@ -144,6 +146,10 @@ autoQc: '1',
   esrganTile: '64',
   esrganGpu: '',
   esrganTta: '0',
+  // 本地层次增强（0~100，0 = 关闭）。
+  // **它会改像素** —— 纯超分是原样放大，这一步是额外的色调映射（不是重新打光）。
+  // 所以默认必须是 0：默认行为要守住「只提分辨率，内容一个像素不动」。
+  esrganDetail: '0',
   // 下载地址留一个覆盖口：国内直连 GitHub 经常不通，可以填镜像地址。
   esrganDownloadUrl: '',
   outputDir: '',
@@ -182,6 +188,7 @@ const SETTABLE = [
   'esrganTile',
   'esrganGpu',
   'esrganTta',
+  'esrganDetail',
   'esrganDownloadUrl',
   'outputDir',
 ]
@@ -244,6 +251,31 @@ function errorMessage(error) {
 function stamp(date = new Date()) {
   const p = (n) => String(n).padStart(2, '0')
   return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}_${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`
+}
+
+/**
+ * 给出一个**不会撞名**的落盘路径。
+ *
+ * 为什么必须有：文件名用的是秒级时间戳。同一秒内跑两次（连点两下、或者
+ * 开着「层次增强」对比着看、或者批量跑）会**静默覆盖**前一张 —— 用户就丢图了，
+ * 而且完全看不出发生过什么。这正是最该避免的那类静默失败。
+ *
+ * 撞名时依次加 `-2` / `-3`，正常情况下文件名保持原样、依然好读。
+ */
+async function uniquePath(dir, fileName) {
+  const ext = path.extname(fileName)
+  const base = ext ? fileName.slice(0, -ext.length) : fileName
+  let candidate = path.join(dir, fileName)
+  for (let index = 2; index < 1000; index += 1) {
+    try {
+      await fsp.access(candidate)
+    } catch {
+      return candidate // 不存在 = 可用
+    }
+    candidate = path.join(dir, `${base}-${index}${ext}`)
+  }
+  // 极端情况（同一秒上千张）：退回带随机后缀，绝不覆盖
+  return path.join(dir, `${base}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}${ext}`)
 }
 
 /** 按原图长宽比求出图的整数尺寸：每条边都落在 [512,2048] 且是 16 的倍数。*/
@@ -1685,6 +1717,13 @@ function esrganModelOf(settings, job) {
   return ESRGAN_MODELS.some((item) => item.id === value) ? value : 'realesrgan-x4plus'
 }
 
+/** 层次增强强度 0~100；0 = 关闭（默认，保证「原样放大」这条默认承诺）。 */
+function esrganDetailOf(settings, job) {
+  const value = Number(esrganOption(settings, job, 'esrganDetail', '0'))
+  if (!Number.isFinite(value) || value <= 0) return 0
+  return Math.max(0, Math.min(100, Math.round(value)))
+}
+
 /** 引擎现状：装没装、在哪、认不认得到 GPU。面板据此决定显示「可用」还是「下载引擎」。 */
 async function localUpscaleStatus(ctx, settings, { probe = false, cwd = '', outDir = '' } = {}) {
   const home = dshHome()
@@ -1719,6 +1758,8 @@ async function localUpscaleStatus(ctx, settings, { probe = false, cwd = '', outD
     model: esrganModelOf(settings, {}),
     gpu: esrganOption(settings, {}, 'esrganGpu', ''),
     tta: String(esrganOption(settings, {}, 'esrganTta', '0')) === '1',
+    detail: esrganDetailOf(settings, {}),
+    toneLevels: TONE_LEVELS.map(({ id, label, hint }) => ({ id, label, hint })),
     limits: ESRGAN_LIMITS,
   }
   if (probe) {
@@ -1823,9 +1864,65 @@ async function runLocalUpscale(ctx, settings, job, invocation) {
     await fsp.rm(work, { recursive: true, force: true }).catch(() => {})
   }
 
-  const fileName = `upscale_${stamp()}_${scale}x.png`
+  // ---- 本地层次增强（可选，默认关闭）----
+  //
+  // 它**在超分之后**、落盘之前跑：先让 GPU 把分辨率与细节做上去，
+  // 再在最终的像素上做色调映射。
+  //
+  // 这一步会改像素，所以是显式开关、默认关；而且无论成功与否都要在结果里
+  // 留一句话 —— 用户最恨的就是「填了没生效」和「悄悄改了东西」。
+  const detail = esrganDetailOf(settings, job)
+  let outputBuffer = outcome.buffer
+  let tone = null
+  if (detail > 0) {
+    const pixels = readPngPixels(outputBuffer)
+    if (!pixels) {
+      tone = { applied: false, strength: detail, reason: '超分结果不是可解析的 8 位 PNG，已跳过层次增强。' }
+    } else {
+      const enhanced = enhanceTone({
+        width: pixels.width,
+        height: pixels.height,
+        data: pixels.data,
+        strength: detail,
+      })
+      outputBuffer = encodePngRgb(pixels.width, pixels.height, enhanced.data)
+      tone = {
+        applied: enhanced.applied,
+        strength: enhanced.strength,
+        blurRadius: enhanced.blurRadius,
+        before: enhanced.before,
+        after: enhanced.after,
+        detailEnergy: enhanced.detailEnergy,
+        clippedRatio: enhanced.clippedRatio,
+      }
+    }
+  }
+
+  const toneNotes = []
+  if (tone?.applied) {
+    // 报「局部层次」而不是只看全局标准差：在硬边为主的图上提亮暗部会让
+    // 全局 std 下降（黑不再那么黑），只报 std 会让人以为「越增强越糊」。
+    const detailText = tone.detailEnergy
+      ? `局部层次 ${tone.detailEnergy.before} → ${tone.detailEnergy.after}`
+      : '局部层次已提升'
+    toneNotes.push(
+      `层次增强已开启（强度 ${tone.strength}）：这是**色调映射，不是重新打光** —— ` +
+        `不会新增光源、不会改光照方向与色温。它改了像素（纯超分是原样放大）；` +
+        `${detailText}，全局对比度 ${tone.before.std} → ${tone.after.std}。`,
+    )
+    if (tone.clippedRatio > 0.02) {
+      toneNotes.push(
+        `⚠ 有 ${(tone.clippedRatio * 100).toFixed(1)}% 的像素被推到纯黑或纯白（细节被压死）。` +
+          '把强度调低一档会更稳。',
+      )
+    }
+  } else if (tone?.reason) {
+    toneNotes.push(`⚠ ${tone.reason}`)
+  }
+
+  const fileName = path.basename(await uniquePath(dir, `upscale_${stamp()}_${scale}x.png`))
   const filePath = path.join(dir, fileName)
-  await fsp.writeFile(filePath, outcome.buffer)
+  await fsp.writeFile(filePath, outputBuffer)
   const relativePath =
     typeof cwd === 'string' && cwd.trim() ? path.relative(path.resolve(cwd), filePath) : undefined
 
@@ -1847,11 +1944,13 @@ async function runLocalUpscale(ctx, settings, job, invocation) {
     sourceSize: `${outcome.inputWidth}x${outcome.inputHeight}`,
     sizeNotice: '',
     // 本地超分没有提示词，但历史记录与面板都用这个字段，给一句人能看懂的就够。
-    prompt: `本地 GPU 超分：${model} × ${scale}（tile ${outcome.tile || 'auto'}）· GPU：${deviceLabel}`,
+    prompt:
+      `本地 GPU 超分：${model} × ${scale}（tile ${outcome.tile || 'auto'}）· GPU：${deviceLabel}` +
+      (tone?.applied ? ` · 层次增强 ${tone.strength}` : ''),
     dir,
     workspaceRoot: typeof cwd === 'string' && cwd.trim() ? path.resolve(cwd) : undefined,
     files: [
-      { name: fileName, path: filePath, relativePath, bytes: outcome.buffer.length },
+      { name: fileName, path: filePath, relativePath, bytes: outputBuffer.length },
     ],
     elapsedMs: Date.now() - started,
     local: {
@@ -1864,10 +1963,12 @@ async function runLocalUpscale(ctx, settings, job, invocation) {
       tile: outcome.tile,
       tta,
       model,
+      detail,
+      tone,
       inputSize: `${outcome.inputWidth}x${outcome.inputHeight}`,
       outputSize: `${outcome.width}x${outcome.height}`,
-      // 自动降 tile / 没做纯色比对这类事必须说出来，不能悄悄发生
-      warnings: outcome.warnings,
+      // 自动降 tile / 没做纯色比对 / 动了像素 这类事必须说出来，不能悄悄发生
+      warnings: [...outcome.warnings, ...toneNotes],
       attempts: outcome.attempts.map((item) => ({
         tile: item.tile,
         elapsedMs: item.elapsedMs,
@@ -2038,7 +2139,10 @@ mode: settings.openaiMode,
   const tag = stamp()
   const files = []
   for (const [index, image] of results.entries()) {
-    const fileName = `render_${tag}_${index + 1}${sniffImageExt(image.data, image.mediaType)}`
+    // uniquePath：同一秒内跑两次会撞名，撞上就静默覆盖前一张（丢图），必须防
+    const fileName = path.basename(
+      await uniquePath(dir, `render_${tag}_${index + 1}${sniffImageExt(image.data, image.mediaType)}`),
+    )
     const filePath = path.join(dir, fileName)
     await fsp.writeFile(filePath, image.data)
     const relativePath = typeof cwd === 'string' && cwd.trim() ? path.relative(path.resolve(cwd), filePath) : undefined

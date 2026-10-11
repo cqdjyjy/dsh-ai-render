@@ -30,9 +30,8 @@
 import { promises as fsp } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import zlib from 'node:zlib'
 import { spawn } from 'node:child_process'
-import { readPngStats, unzipToDir } from './pngzip.js'
+import { encodePngRgb, readPngStats, unzipToDir } from './pngzip.js'
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error)
@@ -77,68 +76,31 @@ export const ESRGAN_LIMITS = {
   minTile: 32,
 }
 
-// ---------------------------------------------------------------- 探针图（最小 PNG 编码器）
+// ---------------------------------------------------------------- 探针图
 
 /**
- * 最小 PNG 编码器：8 位 RGB、filter 0、无隔行。
+ * 生成一张 side×side 的梯度图，给探活用。
  *
- * 只为一件事存在 —— **探活要用一张真图**。实测真引擎在 `-h` 或不带参数时
- * 只打印用法、**不枚举 Vulkan 设备**；设备信息是真正处理图片时才打印的。
+ * 为什么探活要一张真图：实测真引擎在 `-h` 或不带参数时只打印用法、
+ * **不枚举 Vulkan 设备**；设备信息是真正处理图片时才打印的。
  * 所以「这块卡能不能跑」这个问题，只有让它真算一张图才能回答。
  *
- * 刻意不引入任何图像库：插件必须零外部依赖（见 README 的维护者说明）。
+ * 必须有内容（梯度）—— 纯色图会让「输入有内容 / 输出纯色」这条校验失效。
+ * 编码复用 pngzip 的 encodePngRgb，不再自己维护一份 CRC/分块代码。
  */
-const PNG_CRC_TABLE = (() => {
-  const table = new Int32Array(256)
-  for (let n = 0; n < 256; n += 1) {
-    let c = n
-    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
-    table[n] = c
-  }
-  return table
-})()
-
-function pngCrc32(buffer) {
-  let c = -1
-  for (let i = 0; i < buffer.length; i += 1) c = PNG_CRC_TABLE[(c ^ buffer[i]) & 0xff] ^ (c >>> 8)
-  return (c ^ -1) >>> 0
-}
-
-function pngChunk(type, data) {
-  const length = Buffer.alloc(4)
-  length.writeUInt32BE(data.length, 0)
-  const body = Buffer.concat([Buffer.from(type, 'ascii'), data])
-  const crc = Buffer.alloc(4)
-  crc.writeUInt32BE(pngCrc32(body), 0)
-  return Buffer.concat([length, body, crc])
-}
-
-/** 生成一张 side×side 的梯度图（必须有内容，否则纯色判定会失效）。 */
 export function probePng(side = 256) {
   const size = Math.max(8, Math.min(1024, Math.round(side)))
-  const rowBytes = size * 3
-  const raw = Buffer.alloc((rowBytes + 1) * size)
+  const rgb = Buffer.allocUnsafe(size * size * 3)
+  let at = 0
   for (let y = 0; y < size; y += 1) {
-    const base = y * (rowBytes + 1)
-    raw[base] = 0 // filter: None
     for (let x = 0; x < size; x += 1) {
-      const at = base + 1 + x * 3
-      raw[at] = (x * 7 + y * 3) % 256
-      raw[at + 1] = (x * 3) % 256
-      raw[at + 2] = (y * 5 + 40) % 256
+      rgb[at] = (x * 7 + y * 3) % 256
+      rgb[at + 1] = (x * 3) % 256
+      rgb[at + 2] = (y * 5 + 40) % 256
+      at += 3
     }
   }
-  const ihdr = Buffer.alloc(13)
-  ihdr.writeUInt32BE(size, 0)
-  ihdr.writeUInt32BE(size, 4)
-  ihdr[8] = 8 // bit depth
-  ihdr[9] = 2 // colorType: RGB
-  return Buffer.concat([
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-    pngChunk('IHDR', ihdr),
-    pngChunk('IDAT', zlib.deflateSync(raw)),
-    pngChunk('IEND', Buffer.alloc(0)),
-  ])
+  return encodePngRgb(size, size, rgb)
 }
 
 // ---------------------------------------------------------------- 定位引擎
